@@ -1,0 +1,8 @@
+{
+  "name": "Remix: Auto-Accounting NHT",
+  "description": "Hệ thống tự động gắn mã hàng hóa, mã khách hàng, nhà cung cấp cho bảng kê mua bán, xuất nhập tồn và sao kê ngân hàng sử dụng thuật toán so khớp tối ưu.",
+  "requestFramePermissions": [],
+  "majorCapabilities": [
+    "MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"
+  ]
+}

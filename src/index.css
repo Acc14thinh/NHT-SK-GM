@@ -1,0 +1,27 @@
+@import url('https://fonts.googleapis.com/css2?family=Space+Grotesk:wght@400;500;700;900&family=JetBrains+Mono:wght@400;700&display=swap');
+@import "tailwindcss";
+
+@theme {
+  --font-sans: "Space Grotesk", ui-sans-serif, system-ui, sans-serif;
+  --font-mono: "JetBrains Mono", ui-monospace, SFMono-Regular, monospace;
+}
+
+/* Custom CSS scrollbars & animations helpful for Geometric Balance theme */
+::-webkit-scrollbar {
+  width: 8px;
+  height: 8px;
+}
+::-webkit-scrollbar-track {
+  background: #f0f0ed;
+  border-left: 2px solid #141414;
+}
+::-webkit-scrollbar-thumb {
+  background: #141414;
+  border: 2px solid #f0f0ed;
+}
+
+body {
+  background-color: #fdfdfb;
+  color: #1a1a1a;
+}
+
