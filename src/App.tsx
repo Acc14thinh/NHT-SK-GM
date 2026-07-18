@@ -37,8 +37,21 @@ import {
   matchPartnerRow,
   analyzeBankTransaction,
   generateNewCode,
-  normalizeText
+  normalizeText,
+  matchBankRowWithInvoiceEngine,
+  preProcessInvoicePartners,
+  parseDate
 } from "./lib/matchingEngine";
+import {
+  cleanAndDeduplicateHeaders,
+  scoreHeaderRow,
+  proposeBankMappings,
+  validateBankMappings,
+  checkMappingDataQuality,
+  parseAmount,
+  getHeadersFromRawRows
+} from "./lib/excelParser";
+import { ErrorBoundary } from "./components/ErrorBoundary";
 import {
   getSampleCommodities,
   getSamplePartners,
@@ -63,7 +76,12 @@ export default function App() {
     checkThreshold: 70,
     prefixHH: "HH",
     prefixKH: "KH",
-    prefixNCC: "NCC"
+    prefixNCC: "NCC",
+    daysBeforeInvoice: 7,
+    daysAfterInvoice: 30,
+    diffAbsThreshold: 10000,
+    diffPctThreshold: 0.5,
+    maxCombinationCount: 5
   });
 
   // Navigation Menu
@@ -103,14 +121,91 @@ export default function App() {
   // --- MODE 3: Phân tích ngân hàng ---
   const [bankSourceRows, setBankSourceRows] = useState<any[]>([]);
   const [bankMappings, setBankMappings] = useState<ColumnMapping>({
+    ngay_giao_dich: "ngay_gd",
+    ngay_hieu_luc: "",
+    ngay_hach_toan: "",
     noi_dung_giao_dich: "noi_dung_giao_dich",
     so_tien_thu: "so_tien_thu",
     so_tien_chi: "so_tien_chi",
+    so_du: "",
+    ma_giao_dich: "",
+    so_chung_tu: "",
+    so_tham_chieu: "",
+    ten_doi_tac_sao_ke: "ten_doi_tac_sao_ke",
     so_tai_khoan_doi_ung: "so_tai_khoan_doi_ung",
-    ten_doi_tac_sao_ke: "ten_doi_tac_sao_ke"
+    ngan_hang_doi_ung: "",
+    ghi_chu: "",
+    loai_tien_te: "",
+    cot_ngay: "",
+    cot_thang: "",
+    cot_nam: ""
   });
   const [bankMappedRows, setBankMappedRows] = useState<BankAnalysisResult[]>([]);
   const [isProcessingBank, setIsProcessingBank] = useState(false);
+
+  // --- EXCEL WIZARD & AUDIT STATE ---
+  const [uploadedWorkbook, setUploadedWorkbook] = useState<XLSX.WorkBook | null>(null);
+  const [excelWizard, setExcelWizard] = useState<{
+    fileType: "commodity" | "partner" | "bank" | "bank_sales" | "bank_purchases" | null;
+    fileName: string;
+    sheetNames: string[];
+    selectedSheet: string;
+    rawRows: any[][];
+    headerRowIndex: number;
+    headerRowsCount: number;
+    headersCleaned: string[];
+    rowsPreview: any[];
+    onCancel?: () => void;
+  } | null>(null);
+
+  const [bankAuditDetails, setBankAuditDetails] = useState<{
+    fileName: string;
+    sheetName: string;
+    headerRow: number;
+    headerCount: number;
+    totalColumns: number;
+    totalRows: number;
+    allColumns: string[];
+    hasDataColumnsCount: number;
+    emptyColumns: string[];
+    renamedColumns: string[];
+  } | null>(null);
+
+  const [partnerAuditDetails, setPartnerAuditDetails] = useState<{
+    fileName: string;
+    sheetName: string;
+    headerRow: number;
+    headerCount: number;
+    totalColumns: number;
+    totalRows: number;
+    allColumns: string[];
+    hasDataColumnsCount: number;
+    emptyColumns: string[];
+    renamedColumns: string[];
+  } | null>(null);
+
+  // Dữ liệu đối chiếu bổ sung inside bank tab
+  const [bankSalesRows, setBankSalesRows] = useState<any[]>([]);
+  const [bankSalesFileName, setBankSalesFileName] = useState<string>("");
+  const [bankSalesMappings, setBankSalesMappings] = useState<ColumnMapping>({
+    so_hoa_don: "so_hoa_don",
+    ngay_hoa_don: "ngay_hoa_don",
+    ten_khach_hang: "ten_nguoi_mua",
+    ma_khach_hang: "ma_khach_hang",
+    ma_so_thue_khach_hang: "ma_so_thue_nguoi_mua",
+    tong_thanh_toan: "tong_thanh_toan"
+  });
+
+  const [bankPurchasesRows, setBankPurchasesRows] = useState<any[]>([]);
+  const [bankPurchasesFileName, setBankPurchasesFileName] = useState<string>("");
+  const [bankPurchasesMappings, setBankPurchasesMappings] = useState<ColumnMapping>({
+    so_hoa_don: "so_hoa_don",
+    ngay_hoa_don: "ngay_hoa_don",
+    ten_nha_cung_cap: "ten_nguoi_ban",
+    ma_nha_cung_cap: "ma_nha_cung_cap",
+    ma_so_thue_ncc: "ma_so_thue_nguoi_ban",
+    tong_thanh_toan: "tong_thanh_toan"
+  });
 
   // --- MODE 4: Integrated reconciliation ---
   const [isProcessingIntegrated, setIsProcessingIntegrated] = useState(false);
@@ -132,6 +227,15 @@ export default function App() {
   // Notification Banner State
   const [notification, setNotification] = useState<{ message: string; type: "success" | "warning" } | null>(null);
 
+  // Structured privacy-safe upload incident logs
+  const [uploadLogs, setUploadLogs] = useState<{
+    timestamp: string;
+    fileName: string;
+    fileSize: number;
+    fileType: string;
+    errorMsg: string;
+  }[]>([]);
+
   // Directory/Master catalog import confirmation modal state
   const [importConfirm, setImportConfirm] = useState<{
     type: "commodity" | "customer" | "supplier";
@@ -151,6 +255,14 @@ export default function App() {
   const bankHeaders = React.useMemo(() => {
     return bankSourceRows.length > 0 ? Object.keys(bankSourceRows[0]) : [];
   }, [bankSourceRows]);
+
+  const bankSalesHeaders = React.useMemo(() => {
+    return bankSalesRows.length > 0 ? Object.keys(bankSalesRows[0]) : [];
+  }, [bankSalesRows]);
+
+  const bankPurchasesHeaders = React.useMemo(() => {
+    return bankPurchasesRows.length > 0 ? Object.keys(bankPurchasesRows[0]) : [];
+  }, [bankPurchasesRows]);
 
   const getColumnOptions = (headers: string[], currentVal: string) => {
     const uniqueVals = Array.from(new Set([...headers, currentVal].filter(Boolean)));
@@ -172,6 +284,10 @@ export default function App() {
     setCommoditySourceRows(getSamplePurchaseLedger());
     setPartnerSourceRows(getSamplePurchaseLedger());
     setBankSourceRows(getSampleBankStatement());
+    setBankSalesRows(getSampleSalesLedger());
+    setBankPurchasesRows(getSamplePurchaseLedger());
+    setBankSalesFileName("Bang_Ke_Ban_Ra_Demo.xlsx");
+    setBankPurchasesFileName("Bang_Ke_Mua_Vao_Demo.xlsx");
     setUploadedFileName("Du_Lieu_Khao_Sat_Ke_Toan_Mau.xlsx");
     setActiveRowsCount(15);
     triggerToast("Đã nhập số liệu mẫu thành công cho tất cả các phân hệ!");
@@ -187,6 +303,10 @@ export default function App() {
     setPartnerMappedRows([]);
     setBankSourceRows([]);
     setBankMappedRows([]);
+    setBankSalesRows([]);
+    setBankSalesFileName("");
+    setBankPurchasesRows([]);
+    setBankPurchasesFileName("");
     setIntegratedPurchaseRows([]);
     setIntegratedSaleRows([]);
     setIntegratedInvRows([]);
@@ -391,9 +511,35 @@ export default function App() {
     setImportConfirm(null);
   };
 
-  const handleGenericFileUpload = (event: React.ChangeEvent<HTMLInputElement>, fileType: "commodity" | "partner" | "bank") => {
+  const handleGenericFileUpload = (event: React.ChangeEvent<HTMLInputElement>, fileType: "commodity" | "partner" | "bank" | "bank_sales" | "bank_purchases") => {
     const file = event.target.files?.[0];
     if (!file) return;
+
+    // Check extension (Yêu cầu 5)
+    const ext = file.name.split(".").pop()?.toLowerCase();
+    if (ext !== "xlsx" && ext !== "xls" && ext !== "csv") {
+      triggerToast("Định dạng tệp không được hỗ trợ! Vui lòng chọn tệp .xlsx, .xls hoặc .csv", "warning");
+      event.target.value = "";
+      return;
+    }
+
+    // Reset previous states to avoid mixing up data (Yêu cầu 13)
+    if (fileType === "bank") {
+      setBankSourceRows([]);
+      setBankMappedRows([]);
+      setBankAuditDetails(null);
+    } else if (fileType === "partner") {
+      setPartnerSourceRows([]);
+      setPartnerMappedRows([]);
+      setPartnerAuditDetails(null);
+    } else if (fileType === "commodity") {
+      setCommoditySourceRows([]);
+      setCommodityMappedRows([]);
+    } else if (fileType === "bank_sales") {
+      setBankSalesRows([]);
+    } else if (fileType === "bank_purchases") {
+      setBankPurchasesRows([]);
+    }
 
     const reader = new FileReader();
     reader.onload = (e) => {
@@ -402,7 +548,52 @@ export default function App() {
         if (!data) return;
 
         const workbook = XLSX.read(data, { type: "array" });
-        const sheetName = workbook.SheetNames[0];
+        const sheetNames = workbook.SheetNames;
+        if (sheetNames.length === 0) {
+          triggerToast("Không tìm thấy trang tính nào trong file!", "warning");
+          return;
+        }
+
+        if (fileType === "bank" || fileType === "bank_sales" || fileType === "bank_purchases") {
+          const defaultSheet = sheetNames[0];
+          const worksheet = workbook.Sheets[defaultSheet];
+          const rawRows = XLSX.utils.sheet_to_json<any[]>(worksheet, {
+            header: 1,
+            raw: false,
+            defval: ""
+          });
+
+          // Auto-detect best header row among first 30 rows
+          let bestHeaderIndex = 0;
+          let bestScore = -1;
+          const scanLimit = Math.min(30, rawRows.length);
+          for (let i = 0; i < scanLimit; i++) {
+            const score = scoreHeaderRow(rawRows[i]);
+            if (score > bestScore) {
+              bestScore = score;
+              bestHeaderIndex = i;
+            }
+          }
+
+          const cleaned = getHeadersFromRawRows(rawRows, bestHeaderIndex, 1);
+          setUploadedWorkbook(workbook);
+          setExcelWizard({
+            fileType,
+            fileName: file.name,
+            sheetNames,
+            selectedSheet: defaultSheet,
+            rawRows,
+            headerRowIndex: bestHeaderIndex,
+            headerRowsCount: 1,
+            headersCleaned: cleaned,
+            rowsPreview: rawRows.slice(0, 30),
+            onCancel: () => setExcelWizard(null)
+          });
+          triggerToast("Đã tải tệp Excel nguồn. Vui lòng chọn trang và dòng tiêu đề.");
+          return;
+        }
+
+        const sheetName = sheetNames[0];
         const worksheet = workbook.Sheets[sheetName];
         if (!worksheet) {
           triggerToast("Không tìm thấy trang tính nào trong file!", "warning");
@@ -527,13 +718,456 @@ export default function App() {
           setActiveRowsCount(jsonData.length);
           setBankMappedRows([]);
           triggerToast(`Tải tệp sao kê ngân quỹ thành công: ${jsonData.length} dòng.`);
+
+        } else if (fileType === "bank_sales") {
+          const guessedNo = headers.find(h => {
+            const hNorm = h.toLowerCase();
+            return hNorm.includes("so_hoa_don") || hNorm.includes("so_hd") || hNorm.includes("invoice") || hNorm.includes("hóa đơn");
+          }) || headers[0] || "so_hoa_don";
+
+          const guessedDate = headers.find(h => {
+            const hNorm = h.toLowerCase();
+            return hNorm.includes("ngay_hoa_don") || hNorm.includes("ngay_hd") || hNorm.includes("date") || hNorm.includes("ngày");
+          }) || headers[1] || "ngay_hoa_don";
+
+          const guessedKh = headers.find(h => {
+            const hNorm = h.toLowerCase();
+            return hNorm.includes("ten_nguoi_mua") || hNorm.includes("ten_khach_hang") || hNorm.includes("khách hàng") || hNorm.includes("buyer") || hNorm.includes("customer") || hNorm.includes("tên");
+          }) || "ten_nguoi_mua";
+
+          const guessedMaKh = headers.find(h => {
+            const hNorm = h.toLowerCase();
+            return hNorm.includes("ma_khach") || hNorm.includes("ma_kh") || hNorm.includes("buyer_id") || hNorm.includes("customer_id") || hNorm.includes("mã");
+          }) || "ma_khach_hang";
+
+          const guessedMst = headers.find(h => {
+            const hNorm = h.toLowerCase();
+            return hNorm.includes("ma_so_thue") || hNorm.includes("mst") || hNorm.includes("tax");
+          }) || "ma_so_thue_nguoi_mua";
+
+          const guessedAmt = headers.find(h => {
+            const hNorm = h.toLowerCase();
+            return hNorm.includes("tong_thanh_toan") || hNorm.includes("tong_tien") || hNorm.includes("thanh_toan") || hNorm.includes("total") || hNorm.includes("tiền");
+          }) || "tong_thanh_toan";
+
+          setBankSalesRows(jsonData);
+          setBankSalesFileName(file.name);
+          setBankSalesMappings({
+            so_hoa_don: guessedNo,
+            ngay_hoa_don: guessedDate,
+            ten_khach_hang: guessedKh,
+            ma_khach_hang: guessedMaKh,
+            ma_so_thue_khach_hang: guessedMst,
+            tong_thanh_toan: guessedAmt
+          });
+          triggerToast(`Tải tệp bảng kê bán ra thành công: ${jsonData.length} dòng.`);
+
+        } else if (fileType === "bank_purchases") {
+          const guessedNo = headers.find(h => {
+            const hNorm = h.toLowerCase();
+            return hNorm.includes("so_hoa_don") || hNorm.includes("so_hd") || hNorm.includes("invoice") || hNorm.includes("hóa đơn");
+          }) || headers[0] || "so_hoa_don";
+
+          const guessedDate = headers.find(h => {
+            const hNorm = h.toLowerCase();
+            return hNorm.includes("ngay_hoa_don") || hNorm.includes("ngay_hd") || hNorm.includes("date") || hNorm.includes("ngày");
+          }) || headers[1] || "ngay_hoa_don";
+
+          const guessedNcc = headers.find(h => {
+            const hNorm = h.toLowerCase();
+            return hNorm.includes("ten_nguoi_ban") || hNorm.includes("ten_nha_cung_cap") || hNorm.includes("nha_cung_cap") || hNorm.includes("seller") || hNorm.includes("supplier") || hNorm.includes("tên");
+          }) || "ten_nguoi_ban";
+
+          const guessedMaNcc = headers.find(h => {
+            const hNorm = h.toLowerCase();
+            return hNorm.includes("ma_nha_cung_cap") || hNorm.includes("ma_ncc") || hNorm.includes("supplier_id") || hNorm.includes("mã");
+          }) || "ma_nha_cung_cap";
+
+          const guessedMst = headers.find(h => {
+            const hNorm = h.toLowerCase();
+            return hNorm.includes("ma_so_thue") || hNorm.includes("mst") || hNorm.includes("tax");
+          }) || "ma_so_thue_nguoi_ban";
+
+          const guessedAmt = headers.find(h => {
+            const hNorm = h.toLowerCase();
+            return hNorm.includes("tong_thanh_toan") || hNorm.includes("tong_tien") || hNorm.includes("thanh_toan") || hNorm.includes("total") || hNorm.includes("tiền");
+          }) || "tong_thanh_toan";
+
+          setBankPurchasesRows(jsonData);
+          setBankPurchasesFileName(file.name);
+          setBankPurchasesMappings({
+            so_hoa_don: guessedNo,
+            ngay_hoa_don: guessedDate,
+            ten_nha_cung_cap: guessedNcc,
+            ma_nha_cung_cap: guessedMaNcc,
+            ma_so_thue_ncc: guessedMst,
+            tong_thanh_toan: guessedAmt
+          });
+          triggerToast(`Tải tệp bảng kê mua vào thành công: ${jsonData.length} dòng.`);
         }
       } catch (err: any) {
-        console.error(err);
-        triggerToast("Lỗi định dạng cấu trúc tệp! Hãy đảm bảo tệp sạch và đúng cột.", "warning");
+        console.error("Lỗi xử lý file upload:", err);
+        const logEntry = {
+          timestamp: new Date().toISOString(),
+          fileName: file.name,
+          fileSize: file.size,
+          fileType: ext || "unknown",
+          errorMsg: err?.message || String(err)
+        };
+        setUploadLogs(prev => [logEntry, ...prev]);
+        triggerToast(`Lỗi định dạng cấu trúc tệp: ${err?.message || "Đảm bảo tệp sạch và đúng cột."}`, "warning");
+      } finally {
+        event.target.value = "";
       }
     };
+    reader.onerror = () => {
+      triggerToast("Không thể đọc tệp tin từ thiết bị!", "warning");
+      event.target.value = "";
+    };
     reader.readAsArrayBuffer(file);
+  };
+
+  const handleWizardSheetChange = (sheetName: string) => {
+    if (!uploadedWorkbook || !excelWizard) return;
+    const worksheet = uploadedWorkbook.Sheets[sheetName];
+    if (!worksheet) return;
+
+    const rawRows = XLSX.utils.sheet_to_json<any[]>(worksheet, {
+      header: 1,
+      raw: false,
+      defval: ""
+    });
+
+    let bestHeaderIndex = 0;
+    let bestScore = -1;
+    const scanLimit = Math.min(30, rawRows.length);
+    for (let i = 0; i < scanLimit; i++) {
+      const score = scoreHeaderRow(rawRows[i]);
+      if (score > bestScore) {
+        bestScore = score;
+        bestHeaderIndex = i;
+      }
+    }
+
+    const cleaned = getHeadersFromRawRows(rawRows, bestHeaderIndex, 1);
+
+    setExcelWizard(prev => {
+      if (!prev) return null;
+      return {
+        ...prev,
+        selectedSheet: sheetName,
+        rawRows,
+        headerRowIndex: bestHeaderIndex,
+        headerRowsCount: 1,
+        headersCleaned: cleaned,
+        rowsPreview: rawRows.slice(0, 30)
+      };
+    });
+  };
+
+  const handleWizardHeaderRowChange = (index: number) => {
+    setExcelWizard(prev => {
+      if (!prev) return null;
+      const cleaned = getHeadersFromRawRows(prev.rawRows, index, prev.headerRowsCount);
+      return {
+        ...prev,
+        headerRowIndex: index,
+        headersCleaned: cleaned
+      };
+    });
+  };
+
+  const handleWizardHeaderCountChange = (count: number) => {
+    setExcelWizard(prev => {
+      if (!prev) return null;
+      const cleaned = getHeadersFromRawRows(prev.rawRows, prev.headerRowIndex, count);
+      return {
+        ...prev,
+        headerRowsCount: count,
+        headersCleaned: cleaned
+      };
+    });
+  };
+
+  const handleConfirmWizard = () => {
+    if (!excelWizard) return;
+    const { fileType, fileName, selectedSheet, rawRows, headerRowIndex, headerRowsCount } = excelWizard;
+
+    if (rawRows.length <= headerRowIndex) {
+      triggerToast("Dòng tiêu đề vượt quá số dòng của tệp!", "warning");
+      return;
+    }
+
+    const cleanHeaders = getHeadersFromRawRows(rawRows, headerRowIndex, headerRowsCount);
+
+    if (cleanHeaders.length === 0) {
+      triggerToast("Không thể tìm thấy tiêu đề cột hợp lệ!", "warning");
+      return;
+    }
+
+    const dataRows = rawRows.slice(headerRowIndex + headerRowsCount);
+    const jsonData: any[] = [];
+    const emptyColumnsSet = new Set<string>(cleanHeaders);
+    let totalCols = cleanHeaders.length;
+
+    dataRows.forEach((row) => {
+      const isRowEmpty = row.every(val => val === undefined || val === null || String(val).trim() === "");
+      if (isRowEmpty) return;
+
+      const obj: any = {};
+      let hasData = false;
+      cleanHeaders.forEach((header, colIdx) => {
+        let val = row[colIdx];
+        if (val !== undefined && val !== null && String(val).trim() !== "") {
+          obj[header] = typeof val === "string" ? val.trim() : val;
+          emptyColumnsSet.delete(header);
+          hasData = true;
+        } else {
+          obj[header] = "";
+        }
+      });
+      if (hasData) {
+        jsonData.push(obj);
+      }
+    });
+
+    if (jsonData.length === 0) {
+      triggerToast("Không tìm thấy dòng dữ liệu nào bên dưới tiêu đề cột!", "warning");
+      return;
+    }
+
+    const originalHeaderRow = rawRows[headerRowIndex] || [];
+    const renamed: string[] = [];
+    cleanHeaders.forEach((h, idx) => {
+      const orig = String(originalHeaderRow[idx] || "").trim();
+      if (orig && orig !== h) {
+        renamed.push(`Cột ${idx + 1}: "${orig}" ➔ "${h}"`);
+      }
+    });
+
+    const auditInfo = {
+      fileName,
+      sheetName: selectedSheet,
+      headerRow: headerRowIndex + 1,
+      headerCount: headerRowsCount,
+      totalColumns: totalCols,
+      totalRows: jsonData.length,
+      allColumns: cleanHeaders,
+      hasDataColumnsCount: totalCols - emptyColumnsSet.size,
+      emptyColumns: Array.from(emptyColumnsSet),
+      renamedColumns: renamed
+    };
+
+    if (fileType === "bank") {
+      setBankSourceRows(jsonData);
+      setUploadedFileName(fileName);
+      setActiveRowsCount(jsonData.length);
+      setBankMappedRows([]);
+      setBankAuditDetails(auditInfo);
+
+      const proposed = proposeBankMappings(cleanHeaders);
+      setBankMappings(proposed);
+
+      triggerToast(`Nạp ${jsonData.length} dòng sao kê từ sheet "${selectedSheet}" thành công!`);
+    } else if (fileType === "partner") {
+      setPartnerSourceRows(jsonData);
+      setPartnerAuditDetails(auditInfo);
+      setUploadedFileName(fileName);
+      setActiveRowsCount(jsonData.length);
+      setPartnerMappedRows([]);
+
+      const guessedTen = cleanHeaders.find(h => {
+        const hNorm = h.toLowerCase();
+        return hNorm.includes("ten_nguoi_ban") || hNorm.includes("ten_nguoi_mua") || hNorm.includes("ten_doi_tuong") || hNorm.includes("đối tác") || hNorm.includes("khách hàng") || hNorm.includes("nhà cung cấp") || hNorm.includes("company") || hNorm.includes("partner") || hNorm.includes("tên");
+      }) || cleanHeaders[0] || "ten_nguoi_ban";
+
+      const guessedMst = cleanHeaders.find(h => {
+        const hNorm = h.toLowerCase();
+        return hNorm.includes("ma_so_thue") || hNorm.includes("mst") || hNorm.includes("tax") || hNorm.includes("mã số thuế");
+      }) || "ma_so_thue_nguoi_ban";
+
+      const guessedStk = cleanHeaders.find(h => {
+        const hNorm = h.toLowerCase();
+        return hNorm.includes("tai_khoan") || hNorm.includes("stk") || hNorm.includes("acc");
+      }) || "";
+
+      const guessedHH = cleanHeaders.find(h => {
+        const hNorm = h.toLowerCase();
+        return hNorm.includes("ten_hang") || hNorm.includes("dien_giai") || hNorm.includes("noi_dung") || hNorm.includes("mặt hàng");
+      }) || "ten_hang_hoa_dich_vu";
+
+      setPartnerMappings({
+        ten_doi_tuong: guessedTen,
+        ma_so_thue: guessedMst,
+        so_tai_khoan: guessedStk,
+        ten_hang_hoa: guessedHH
+      });
+
+      triggerToast(`Nạp ${jsonData.length} dòng dữ liệu đối tác từ sheet "${selectedSheet}" thành công!`);
+    } else if (fileType === "bank_sales") {
+      setBankSalesRows(jsonData);
+      setBankSalesFileName(fileName);
+
+      const guessedNo = cleanHeaders.find(h => {
+        const hNorm = h.toLowerCase();
+        return hNorm.includes("so_hoa_don") || hNorm.includes("so_hd") || hNorm.includes("invoice") || hNorm.includes("hóa đơn");
+      }) || cleanHeaders[0] || "so_hoa_don";
+
+      const guessedDate = cleanHeaders.find(h => {
+        const hNorm = h.toLowerCase();
+        return hNorm.includes("ngay_hoa_don") || hNorm.includes("ngay_hd") || hNorm.includes("date") || hNorm.includes("ngày");
+      }) || cleanHeaders[1] || "ngay_hoa_don";
+
+      const guessedKh = cleanHeaders.find(h => {
+        const hNorm = h.toLowerCase();
+        return hNorm.includes("ten_nguoi_mua") || hNorm.includes("ten_khach_hang") || hNorm.includes("khách hàng") || hNorm.includes("buyer") || hNorm.includes("customer") || hNorm.includes("tên");
+      }) || "ten_nguoi_mua";
+
+      const guessedMaKh = cleanHeaders.find(h => {
+        const hNorm = h.toLowerCase();
+        return hNorm.includes("ma_khach") || hNorm.includes("ma_kh") || hNorm.includes("buyer_id") || hNorm.includes("customer_id") || hNorm.includes("mã");
+      }) || "ma_khach_hang";
+
+      const guessedMst = cleanHeaders.find(h => {
+        const hNorm = h.toLowerCase();
+        return hNorm.includes("ma_so_thue") || hNorm.includes("mst") || hNorm.includes("tax");
+      }) || "ma_so_thue_nguoi_mua";
+
+      const guessedAmt = cleanHeaders.find(h => {
+        const hNorm = h.toLowerCase();
+        return hNorm.includes("tong_thanh_toan") || hNorm.includes("tong_tien") || hNorm.includes("thanh_toan") || hNorm.includes("total") || hNorm.includes("tiền");
+      }) || "tong_thanh_toan";
+
+      setBankSalesMappings({
+        so_hoa_don: guessedNo,
+        ngay_hoa_don: guessedDate,
+        ten_khach_hang: guessedKh,
+        ma_khach_hang: guessedMaKh,
+        ma_so_thue_khach_hang: guessedMst,
+        tong_thanh_toan: guessedAmt
+      });
+      triggerToast(`Nạp ${jsonData.length} dòng bảng kê bán ra thành công!`);
+    } else if (fileType === "bank_purchases") {
+      setBankPurchasesRows(jsonData);
+      setBankPurchasesFileName(fileName);
+
+      const guessedNo = cleanHeaders.find(h => {
+        const hNorm = h.toLowerCase();
+        return hNorm.includes("so_hoa_don") || hNorm.includes("so_hd") || hNorm.includes("invoice") || hNorm.includes("hóa đơn");
+      }) || cleanHeaders[0] || "so_hoa_don";
+
+      const guessedDate = cleanHeaders.find(h => {
+        const hNorm = h.toLowerCase();
+        return hNorm.includes("ngay_hoa_don") || hNorm.includes("ngay_hd") || hNorm.includes("date") || hNorm.includes("ngày");
+      }) || cleanHeaders[1] || "ngay_hoa_don";
+
+      const guessedNcc = cleanHeaders.find(h => {
+        const hNorm = h.toLowerCase();
+        return hNorm.includes("ten_nguoi_ban") || hNorm.includes("ten_nha_cung_cap") || hNorm.includes("nha_cung_cap") || hNorm.includes("seller") || hNorm.includes("supplier") || hNorm.includes("tên");
+      }) || "ten_nguoi_ban";
+
+      const guessedMaNcc = cleanHeaders.find(h => {
+        const hNorm = h.toLowerCase();
+        return hNorm.includes("ma_nha_cung_cap") || hNorm.includes("ma_ncc") || hNorm.includes("supplier_id") || hNorm.includes("mã");
+      }) || "ma_nha_cung_cap";
+
+      const guessedMst = cleanHeaders.find(h => {
+        const hNorm = h.toLowerCase();
+        return hNorm.includes("ma_so_thue") || hNorm.includes("mst") || hNorm.includes("tax");
+      }) || "ma_so_thue_nguoi_ban";
+
+      const guessedAmt = cleanHeaders.find(h => {
+        const hNorm = h.toLowerCase();
+        return hNorm.includes("tong_thanh_toan") || hNorm.includes("tong_tien") || hNorm.includes("thanh_toan") || hNorm.includes("total") || hNorm.includes("tiền");
+      }) || "tong_thanh_toan";
+
+      setBankPurchasesMappings({
+        so_hoa_don: guessedNo,
+        ngay_hoa_don: guessedDate,
+        ten_nha_cung_cap: guessedNcc,
+        ma_nha_cung_cap: guessedMaNcc,
+        ma_so_thue_ncc: guessedMst,
+        tong_thanh_toan: guessedAmt
+      });
+      triggerToast(`Nạp ${jsonData.length} dòng bảng kê mua vào thành công!`);
+    }
+
+    setExcelWizard(null);
+  };
+
+  const handleReopenWizard = (type: "bank" | "partner" | "bank_sales" | "bank_purchases") => {
+    if (!uploadedWorkbook) {
+      triggerToast("Không tìm thấy tệp Excel nào đang được mở. Hãy tải tệp lên trước!", "warning");
+      return;
+    }
+    const sheetNames = uploadedWorkbook.SheetNames;
+    const currentSheet = sheetNames[0];
+    const worksheet = uploadedWorkbook.Sheets[currentSheet];
+    const rawRows = XLSX.utils.sheet_to_json<any[]>(worksheet, {
+      header: 1,
+      raw: false,
+      defval: ""
+    });
+
+    let bestHeaderIndex = 0;
+    let bestScore = -1;
+    const scanLimit = Math.min(30, rawRows.length);
+    for (let i = 0; i < scanLimit; i++) {
+      const score = scoreHeaderRow(rawRows[i]);
+      if (score > bestScore) {
+        bestScore = score;
+        bestHeaderIndex = i;
+      }
+    }
+
+    const cleaned = getHeadersFromRawRows(rawRows, bestHeaderIndex, 1);
+    setExcelWizard({
+      fileType: type,
+      fileName: uploadedFileName || (type === "bank" ? "Sao_Ke_Ngan_Hang.xlsx" : type === "partner" ? "Danh_Muc_Doi_Tac.xlsx" : type === "bank_sales" ? "Bang_Ke_Ban_Ra.xlsx" : "Bang_Ke_Mua_Vao.xlsx"),
+      sheetNames,
+      selectedSheet: currentSheet,
+      rawRows,
+      headerRowIndex: bestHeaderIndex,
+      headerRowsCount: 1,
+      headersCleaned: cleaned,
+      rowsPreview: rawRows.slice(0, 30),
+      onCancel: () => setExcelWizard(null)
+    });
+    triggerToast("Đã mở lại cấu hình Excel Wizard.");
+  };
+
+  const handleRestoreAutoMapping = () => {
+    if (bankHeaders.length === 0) {
+      triggerToast("Chưa có dữ liệu sao kê ngân hàng!", "warning");
+      return;
+    }
+    const proposed = proposeBankMappings(bankHeaders);
+    setBankMappings(proposed);
+    triggerToast("Đã tự động khôi phục cấu hình ánh xạ cột tối ưu!");
+  };
+
+  const handleClearMapping = () => {
+    setBankMappings({
+      ngay_giao_dich: "",
+      ngay_hieu_luc: "",
+      ngay_hach_toan: "",
+      noi_dung_giao_dich: "",
+      so_tien_thu: "",
+      so_tien_chi: "",
+      so_du: "",
+      ma_giao_dich: "",
+      so_chung_tu: "",
+      so_tham_chieu: "",
+      ten_doi_tac_sao_ke: "",
+      so_tai_khoan_doi_ung: "",
+      ngan_hang_doi_ung: "",
+      ghi_chu: "",
+      loai_tien_te: "",
+      cot_ngay: "",
+      cot_thang: "",
+      cot_nam: ""
+    });
+    triggerToast("Đã dọn sạch tất cả cấu hình ánh xạ cột!");
   };
 
   // Switch partner mapping based on Mua vào / Bán ra state
@@ -724,36 +1358,94 @@ export default function App() {
     setIsProcessingBank(true);
 
     setTimeout(() => {
-      const results = bankSourceRows.map((row, index) => {
-        const desc = row[bankMappings.noi_dung_giao_dich] || "";
-        const amIn = parseFloat(row[bankMappings.so_tien_thu]) || 0;
-        const amOut = parseFloat(row[bankMappings.so_tien_chi]) || 0;
-        const counterpartAcc = row[bankMappings.so_tai_khoan_doi_ung] || "";
-        const counterpartName = row[bankMappings.ten_doi_tac_sao_ke] || "";
+      // 1. Tự động phát hiện và tạo mã đối tác mới từ bảng kê mua/bán (Section 17)
+      const newlyCreatedPartners = preProcessInvoicePartners(
+        bankSalesRows,
+        bankSalesMappings,
+        bankPurchasesRows,
+        bankPurchasesMappings,
+        partners,
+        config.prefixKH || "KH",
+        config.prefixNCC || "NCC"
+      );
 
-        const analysis = analyzeBankTransaction(
-          desc,
-          amIn,
-          amOut,
-          counterpartAcc,
-          counterpartName,
-          partners,
-          config.autoThreshold,
-          config.autoThreshold
-        );
+      if (newlyCreatedPartners.length > 0) {
+        setPartners(prev => {
+          const prevCodes = new Set(prev.map(p => p.ma_doi_tuong));
+          const filtered = newlyCreatedPartners.filter(p => !prevCodes.has(p.ma_doi_tuong));
+          return [...prev, ...filtered];
+        });
+        triggerToast(`Đã tự động thêm ${newlyCreatedPartners.length} đối tác mới chưa có trong danh mục!`);
+      }
+
+      // 2. Khởi tạo sổ theo dõi công nợ tạm thời cho từng hóa đơn (Section 11)
+      const invoiceBalances = new Map<string, number>();
+
+      // Hóa đơn bán ra
+      bankSalesRows.forEach(row => {
+        const invNo = String(row[bankSalesMappings.so_hoa_don] || "").trim();
+        const invDateVal = row[bankSalesMappings.ngay_hoa_don];
+        // Parse date to standard string
+        const dObj = parseDate(invDateVal);
+        const invDateStr = dObj ? `${dObj.getFullYear()}-${String(dObj.getMonth() + 1).padStart(2, "0")}-${String(dObj.getDate()).padStart(2, "0")}` : "";
+        const invAmount = parseFloat(row[bankSalesMappings.tong_thanh_toan]) || 0;
+        const key = `${invNo}_${invDateStr}_${invAmount}`;
+        if (invNo && invAmount > 0) {
+          invoiceBalances.set(key, invAmount);
+        }
+      });
+
+      // Hóa đơn mua vào
+      bankPurchasesRows.forEach(row => {
+        const invNo = String(row[bankPurchasesMappings.so_hoa_don] || "").trim();
+        const invDateVal = row[bankPurchasesMappings.ngay_hoa_don];
+        const dObj = parseDate(invDateVal);
+        const invDateStr = dObj ? `${dObj.getFullYear()}-${String(dObj.getMonth() + 1).padStart(2, "0")}-${String(dObj.getDate()).padStart(2, "0")}` : "";
+        const invAmount = parseFloat(row[bankPurchasesMappings.tong_thanh_toan]) || 0;
+        const key = `${invNo}_${invDateStr}_${invAmount}`;
+        if (invNo && invAmount > 0) {
+          invoiceBalances.set(key, invAmount);
+        }
+      });
+
+      // 3. Tiến hành đối chiếu theo thứ tự thời gian sao kê
+      const existingCodes = partners.map(p => p.ma_doi_tuong);
+      const combinedActivePartners = [...partners, ...newlyCreatedPartners];
+
+      const results = bankSourceRows.map((row, index) => {
+        const analysis = matchBankRowWithInvoiceEngine({
+          bankRow: row,
+          bankMappings,
+          partners: combinedActivePartners,
+          salesLedger: bankSalesRows,
+          salesMappings: bankSalesMappings,
+          purchaseLedger: bankPurchasesRows,
+          purchaseMappings: bankPurchasesMappings,
+          config: {
+            autoThreshold: config.autoThreshold,
+            checkThreshold: config.checkThreshold,
+            daysBeforeInvoice: config.daysBeforeInvoice || 7,
+            daysAfterInvoice: config.daysAfterInvoice || 30,
+            diffAbsThreshold: config.diffAbsThreshold || 10000,
+            diffPctThreshold: config.diffPctThreshold || 0.5,
+            maxCombinationCount: config.maxCombinationCount || 5,
+            prefixKH: config.prefixKH || "KH",
+            prefixNCC: config.prefixNCC || "NCC"
+          },
+          invoiceBalances,
+          existingCodes,
+          tempCreatedPartners: newlyCreatedPartners
+        });
 
         return {
           ...analysis,
-          id: `bank_${index}`,
-          date: row.ngay_giao_dich || new Date().toISOString().substring(0, 10),
-          notes: "",
-          rawRowData: row
-        } as BankAnalysisResult;
+          id: `bank_${index}`
+        };
       });
 
       setBankMappedRows(results);
       setIsProcessingBank(false);
-      triggerToast("Đã xếp lớp tự động sao kê ngân hàng!");
+      triggerToast("Đã đối chiếu thành công sao kê ngân hàng với các hóa đơn!");
     }, 600);
   };
 
@@ -1037,26 +1729,219 @@ export default function App() {
       triggerToast("Không có bảng sao kê ngân hàng để xuất!", "warning");
       return;
     }
-    const dataToExport = bankMappedRows.map((row) => {
+
+    const workbook = XLSX.utils.book_new();
+
+    // 1. Sheet: Sao_ke_da_gan_ma
+    const sheet1Data = bankMappedRows.map((row) => {
       const baseRow = { ...(row.rawRowData || {}) };
-      baseRow["Mã đối tượng"] = row.proposedCode || "";
-      baseRow["Tên đối tượng chuẩn"] = row.proposedName || "Nghi vấn / Thất lạc";
-      baseRow["Loại đối tượng"] = row.predictedGroup.toLowerCase().includes("khách hàng") ? "Khách hàng" : row.predictedGroup.toLowerCase().includes("nhà cung cấp") ? "Nhà cung cấp" : "Khác";
-      baseRow["Điểm tương thích"] = `${row.score}%`;
-      baseRow["Nhóm giao dịch AI dự đoán"] = row.predictedGroup;
-      baseRow["Lý do dự đoán"] = row.reason;
-      baseRow["Trạng thái xử lý"] = row.treatment === "Đã chốt" ? "Đã chốt" : "Cần kiểm tra";
-      baseRow["Ghi chú"] = row.notes || "";
+      baseRow["Mã đối tượng đề xuất"] = row.proposedCode || "";
+      baseRow["Tên đối tượng đề xuất"] = row.proposedName || "Nghi vấn / Thất lạc";
+      baseRow["Loại đối tượng"] = row.proposedType || (row.predictedGroup.toLowerCase().includes("khách hàng") ? "Khách hàng" : row.predictedGroup.toLowerCase().includes("nhà cung cấp") ? "Nhà cung cấp" : "Khác");
+      baseRow["Nguồn gắn mã"] = row.matchingSource || "Diễn giải";
+      baseRow["Số hóa đơn khớp"] = row.matchedInvoiceNo || "";
+      baseRow["Ngày hóa đơn khớp"] = row.matchedInvoiceDate || "";
+      baseRow["Giá trị hóa đơn"] = row.invoiceAmount !== undefined ? row.invoiceAmount : "";
+      baseRow["Số tiền giao dịch"] = row.amountIn > 0 ? row.amountIn : row.amountOut;
+      baseRow["Chênh lệch số tiền"] = row.differenceAmount !== undefined ? row.differenceAmount : "";
+      baseRow["Tỷ lệ chênh lệch (%)"] = row.differencePercentage !== undefined ? `${row.differencePercentage.toFixed(2)}%` : "";
+      baseRow["Số ngày chênh lệch"] = row.differenceDays !== undefined ? row.differenceDays : "";
+      baseRow["Điểm khớp nội dung"] = row.scoreDesc !== undefined ? row.scoreDesc : "";
+      baseRow["Điểm khớp tên"] = row.scoreName !== undefined ? row.scoreName : "";
+      baseRow["Điểm khớp số tài khoản"] = row.scoreAcc !== undefined ? row.scoreAcc : "";
+      baseRow["Điểm khớp mã số thuế"] = row.scoreMst !== undefined ? row.scoreMst : "";
+      baseRow["Điểm khớp số hóa đơn"] = row.scoreInvoice !== undefined ? row.scoreInvoice : "";
+      baseRow["Điểm khớp số tiền"] = row.scoreAmount !== undefined ? row.scoreAmount : "";
+      baseRow["Điểm khớp ngày"] = row.scoreDate !== undefined ? row.scoreDate : "";
+      baseRow["Điểm lịch sử"] = row.scoreHistory !== undefined ? row.scoreHistory : "";
+      baseRow["Điểm phạt mâu thuẫn"] = row.scorePenalty !== undefined ? row.scorePenalty : "";
+      baseRow["Tổng điểm tin cậy"] = row.score !== undefined ? row.score : "";
+      
+      const p1 = row.top3Proposals && row.top3Proposals[0] ? `${row.top3Proposals[0].code} - ${row.top3Proposals[0].name} (${row.top3Proposals[0].score}đ)` : "";
+      const p2 = row.top3Proposals && row.top3Proposals[1] ? `${row.top3Proposals[1].code} - ${row.top3Proposals[1].name} (${row.top3Proposals[1].score}đ)` : "";
+      const p3 = row.top3Proposals && row.top3Proposals[2] ? `${row.top3Proposals[2].code} - ${row.top3Proposals[2].name} (${row.top3Proposals[2].score}đ)` : "";
+      baseRow["Phương án 1"] = p1;
+      baseRow["Phương án 2"] = p2;
+      baseRow["Phương án 3"] = p3;
+
+      baseRow["Lý do đề xuất"] = row.reason || "";
+      baseRow["Trạng thái xử lý"] = row.processingStatus || (row.treatment === "Đã chốt" ? "Đã chốt" : "Cần kiểm tra");
+      baseRow["Ghi chú kế toán"] = row.notes || "";
       return baseRow;
     });
+    const ws1 = XLSX.utils.json_to_sheet(sheet1Data);
+    XLSX.utils.book_append_sheet(workbook, ws1, "Sao_ke_da_gan_ma");
 
-    const worksheet = XLSX.utils.json_to_sheet(dataToExport);
-    const workbook = XLSX.utils.book_new();
-    XLSX.utils.book_append_sheet(workbook, worksheet, "Sao_ke_da_gan_ma");
+    // 2. Sheet: Chi_tiet_doi_chieu_hoa_don
+    const sheet2Data = bankMappedRows
+      .filter(row => row.matchedInvoiceNo)
+      .map(row => ({
+        "Ngày giao dịch": row.date,
+        "Nội dung ngân hàng": row.desc,
+        "Tiền thu (Có)": row.amountIn,
+        "Tiền chi (Nợ)": row.amountOut,
+        "Mã đối tượng": row.proposedCode,
+        "Tên đối tượng": row.proposedName,
+        "Số hóa đơn khớp": row.matchedInvoiceNo,
+        "Ngày hóa đơn": row.matchedInvoiceDate,
+        "Giá trị hóa đơn gốc": row.invoiceAmount,
+        "Chênh lệch số tiền": row.differenceAmount,
+        "Tỷ lệ chênh lệch (%)": row.differencePercentage !== undefined ? `${row.differencePercentage.toFixed(2)}%` : "",
+        "Độ lệch (Ngày)": row.differenceDays,
+        "Điểm khớp": row.score,
+        "Trạng thái thanh toán": row.processingStatus,
+        "Chi tiết đối chiếu": row.reason
+      }));
+    const ws2 = XLSX.utils.json_to_sheet(sheet2Data);
+    XLSX.utils.book_append_sheet(workbook, ws2, "Chi_tiet_doi_chieu_hoa_don");
 
-    const baseName = uploadedFileName ? uploadedFileName.replace(/\.[^/.]+$/, "") : "Sao_ke_ngan_hang";
-    XLSX.writeFile(workbook, `${baseName}_da_gan_ma.xlsx`);
-    triggerToast("Đã xuất khẩu tệp hạch toán sao kê ngân quỹ thành công!");
+    // 3. Sheet: Cac_dong_can_kiem_tra
+    const sheet3Data = bankMappedRows
+      .filter(row => row.treatment === "Cần kiểm tra" || row.score < config.autoThreshold)
+      .map(row => ({
+        "Ngày giao dịch": row.date,
+        "Nội dung ngân hàng": row.desc,
+        "Tiền thu (Có)": row.amountIn,
+        "Tiền chi (Nợ)": row.amountOut,
+        "Mã đối tượng tạm gắn": row.proposedCode,
+        "Tên đối tượng tạm gắn": row.proposedName,
+        "Trạng thái xử lý": row.processingStatus || "Cần kiểm tra",
+        "Điểm tin cậy": row.score,
+        "Lý do cần kiểm tra": row.reason,
+        "Các đề xuất khác (Top 3)": row.top3Proposals ? row.top3Proposals.map(p => `${p.code}-${p.name} (${p.score}đ)`).join(" | ") : "",
+        "Ghi chú kế toán": row.notes
+      }));
+    const ws3 = XLSX.utils.json_to_sheet(sheet3Data);
+    XLSX.utils.book_append_sheet(workbook, ws3, "Cac_dong_can_kiem_tra");
+
+    // 4. Sheet: Giao_dich_ghep_nhieu_HD
+    const sheet4Data = bankMappedRows
+      .filter(row => row.processingStatus === "Ghép nhiều hóa đơn")
+      .map(row => ({
+        "Ngày giao dịch": row.date,
+        "Nội dung ngân hàng": row.desc,
+        "Số tiền giao dịch": row.amountIn > 0 ? row.amountIn : row.amountOut,
+        "Mã đối tượng": row.proposedCode,
+        "Tên đối tượng": row.proposedName,
+        "Danh sách số hóa đơn ghép": row.matchedInvoiceNo,
+        "Danh sách ngày hóa đơn": row.matchedInvoiceDate,
+        "Tổng giá trị các hóa đơn": row.invoiceAmount,
+        "Chênh lệch": row.differenceAmount,
+        "Lý do ghép chi tiết": row.reason
+      }));
+    const ws4 = XLSX.utils.json_to_sheet(sheet4Data);
+    XLSX.utils.book_append_sheet(workbook, ws4, "Giao_dich_ghep_nhieu_HD");
+
+    // 5. Sheet: Hoa_don_thanh_toan_mot_phan
+    const sheet5Data: any[] = [];
+    bankSalesRows.forEach(row => {
+      const invNo = String(row[bankSalesMappings.so_hoa_don] || "").trim();
+      const invDateVal = row[bankSalesMappings.ngay_hoa_don];
+      const dObj = parseDate(invDateVal);
+      const invDateStr = dObj ? `${dObj.getFullYear()}-${String(dObj.getMonth() + 1).padStart(2, "0")}-${String(dObj.getDate()).padStart(2, "0")}` : "";
+      const originalAmount = parseFloat(row[bankSalesMappings.tong_thanh_toan]) || 0;
+      
+      let totalPaidOnThis = 0;
+      bankMappedRows.forEach(b => {
+        if (b.matchedInvoiceNo && b.matchedInvoiceNo.includes(invNo)) {
+          if (b.processingStatus === "Ghép nhiều hóa đơn") {
+            totalPaidOnThis += originalAmount;
+          } else {
+            const paid = b.amountIn > 0 ? b.amountIn : b.amountOut;
+            totalPaidOnThis += Math.min(paid, originalAmount);
+          }
+        }
+      });
+
+      if (totalPaidOnThis > 0 && totalPaidOnThis < originalAmount) {
+        sheet5Data.push({
+          "Phân hệ": "Bán ra (Phải thu)",
+          "Số hóa đơn": invNo,
+          "Ngày hóa đơn": invDateStr,
+          "Mã khách hàng": row[bankSalesMappings.ma_khach_hang] || "",
+          "Tên khách hàng": row[bankSalesMappings.ten_khach_hang] || "",
+          "Mã số thuế": row[bankSalesMappings.ma_so_thue_khach_hang] || "",
+          "Tổng tiền hóa đơn": originalAmount,
+          "Đã khớp ngân quỹ": totalPaidOnThis,
+          "Còn nợ lại": originalAmount - totalPaidOnThis,
+          "Trạng thái": "Thanh toán một phần"
+        });
+      }
+    });
+
+    bankPurchasesRows.forEach(row => {
+      const invNo = String(row[bankPurchasesMappings.so_hoa_don] || "").trim();
+      const invDateVal = row[bankPurchasesMappings.ngay_hoa_don];
+      const dObj = parseDate(invDateVal);
+      const invDateStr = dObj ? `${dObj.getFullYear()}-${String(dObj.getMonth() + 1).padStart(2, "0")}-${String(dObj.getDate()).padStart(2, "0")}` : "";
+      const originalAmount = parseFloat(row[bankPurchasesMappings.tong_thanh_toan]) || 0;
+
+      let totalPaidOnThis = 0;
+      bankMappedRows.forEach(b => {
+        if (b.matchedInvoiceNo && b.matchedInvoiceNo.includes(invNo)) {
+          if (b.processingStatus === "Ghép nhiều hóa đơn") {
+            totalPaidOnThis += originalAmount;
+          } else {
+            const paid = b.amountIn > 0 ? b.amountIn : b.amountOut;
+            totalPaidOnThis += Math.min(paid, originalAmount);
+          }
+        }
+      });
+
+      if (totalPaidOnThis > 0 && totalPaidOnThis < originalAmount) {
+        sheet5Data.push({
+          "Phân hệ": "Mua vào (Phải trả)",
+          "Số hóa đơn": invNo,
+          "Ngày hóa đơn": invDateStr,
+          "Mã nhà cung cấp": row[bankPurchasesMappings.ma_nha_cung_cap] || "",
+          "Tên nhà cung cấp": row[bankPurchasesMappings.ten_nha_cung_cap] || "",
+          "Mã số thuế": row[bankPurchasesMappings.ma_so_thue_ncc] || "",
+          "Tổng tiền hóa đơn": originalAmount,
+          "Đã khớp ngân quỹ": totalPaidOnThis,
+          "Còn nợ lại": originalAmount - totalPaidOnThis,
+          "Trạng thái": "Thanh toán một phần"
+        });
+      }
+    });
+
+    const ws5 = XLSX.utils.json_to_sheet(sheet5Data.length > 0 ? sheet5Data : [{ "Thông báo": "Không có hóa đơn thanh toán một phần" }]);
+    XLSX.utils.book_append_sheet(workbook, ws5, "Hoa_don_thanh_toan_mot_phan");
+
+    // 6. Sheet: Log_doi_chieu
+    const sheet6Data = bankMappedRows.map((row, idx) => ({
+      "STT": idx + 1,
+      "Thời điểm": new Date().toLocaleString(),
+      "Ngày giao dịch ngân quỹ": row.date,
+      "Số tiền": row.amountIn > 0 ? row.amountIn : row.amountOut,
+      "Loại giao dịch": row.amountIn > 0 ? "Thu (Có)" : "Chi (Nợ)",
+      "Mã đối tượng hạch toán": row.proposedCode || "Chưa rõ",
+      "Tên đối tượng hạch toán": row.proposedName || "Chưa rõ",
+      "Phương pháp gắn mã": row.matchingSource || "Diễn giải",
+      "Trạng thái kiểm tra": row.treatment,
+      "Hành động áp dụng": row.processingStatus,
+      "Diễn giải quy tắc": row.reason
+    }));
+    const ws6 = XLSX.utils.json_to_sheet(sheet6Data);
+    XLSX.utils.book_append_sheet(workbook, ws6, "Log_doi_chieu");
+
+    // 7. Sheet: Danh_muc_doi_tuong_cap_nhat
+    const sheet7Data = partners.map(p => ({
+      "Mã đối tác": p.ma_doi_tuong,
+      "Tên đối tác chuẩn": p.ten_doi_tuong,
+      "Phân loại đối tác": p.loai_doi_tuong,
+      "Mã số thuế": p.ma_so_thue || "",
+      "Số tài khoản": p.so_tai_khoan || "",
+      "Ngân hàng": p.ngan_hang || "",
+      "Địa chỉ liên hệ": p.dia_chi || "",
+      "Từ khóa nhận diện": p.tu_khoa_nhan_dien || "",
+      "Ghi chú nguồn tạo": p.ghi_chu || "Danh mục mặc định"
+    }));
+    const ws7 = XLSX.utils.json_to_sheet(sheet7Data);
+    XLSX.utils.book_append_sheet(workbook, ws7, "Danh_muc_doi_tuong_cap_nhat");
+
+    const baseName = uploadedFileName ? uploadedFileName.replace(/\.[^/.]+$/, "") : "Doi_chieu_sao_ke_ngan_hang";
+    XLSX.writeFile(workbook, `${baseName}_báo_cáo_đối_chiếu.xlsx`);
+    triggerToast("Đã xuất khẩu tệp báo cáo đối chiếu sao kê đa chiều (7 trang tính) thành công!");
   };
 
   const exportFullSetToExcel = () => {
@@ -1289,7 +2174,188 @@ export default function App() {
 
 
   return (
-    <div className="min-h-screen bg-[#fdfdfb] text-[#1a1a1a] font-sans flex flex-col selection:bg-[#00ff00] selection:text-black">
+    <ErrorBoundary fallbackTitle="LỖI CHUNG TRONG ỨNG DỤNG SMARTLEDGER">
+      <div className="min-h-screen bg-[#fdfdfb] text-[#1a1a1a] font-sans flex flex-col selection:bg-[#00ff00] selection:text-black">
+      {/* --- EXCEL STRUCTURE INTEGRITY WIZARD --- */}
+      {excelWizard && (
+        <div className="fixed inset-0 bg-[#141414]/75 z-50 flex items-center justify-center p-4 backdrop-blur-xs overflow-y-auto">
+          <div className="bg-white border-4 border-[#141414] shadow-[8px_8px_0px_#141414] max-w-4xl w-full max-h-[90vh] flex flex-col animate-in fade-in zoom-in-95 duration-150">
+            {/* Modal Header */}
+            <div className="bg-amber-300 border-b-4 border-[#141414] p-4 flex justify-between items-center">
+              <div className="flex items-center gap-2.5">
+                <span className="bg-white border-2 border-black p-1 text-xs font-black uppercase shadow-[1.5px_1.5px_0px_#141414]">WIZARD</span>
+                <div>
+                  <h3 className="font-black text-sm uppercase tracking-tight text-black">TRỢ LÝ ĐỌC HIỂU CẤU TRÚC EXCEL</h3>
+                  <p className="text-[10px] text-black/75 uppercase font-bold">Căn chỉnh dòng tiêu đề, trang tính & sửa cột của tệp {excelWizard.fileType === "bank" ? "Sao kê Ngân hàng" : "Sổ Kho Đối Tác"}</p>
+                </div>
+              </div>
+              <button onClick={excelWizard.onCancel} className="bg-white hover:bg-red-200 text-black border-2 border-black font-black p-1 shadow-[2px_2px_0px_#141414] active:translate-y-0.5 transition cursor-pointer text-xs px-2.5">ĐÓNG ✕</button>
+            </div>
+
+            {/* Modal Content */}
+            <div className="p-6 overflow-y-auto flex-1 space-y-6">
+              <div className="bg-[#f0f0ed] border-2 border-[#141414] p-4 flex items-center gap-3.5">
+                <div className="text-2xl">📋</div>
+                <div className="text-xs">
+                  <p className="font-black text-black uppercase">Tên tệp đang nạp: <span className="font-mono text-blue-600 underline">{excelWizard.fileName}</span></p>
+                  <p className="text-slate-500 font-bold mt-0.5">Vui lòng kiểm tra kỹ xem tiêu đề thực tế nằm ở dòng mấy. Hệ thống không tự động ép buộc dòng 1 để tránh sai sót.</p>
+                </div>
+              </div>
+
+              {/* Step Grid controls */}
+              <div className="grid grid-cols-1 md:grid-cols-2 gap-6">
+                
+                {/* Left controls: Select sheet and header row */}
+                <div className="space-y-4 border-2 border-[#141414] p-4 bg-slate-50 shadow-[4px_4px_0px_#141414]">
+                  <h4 className="font-black text-xs uppercase tracking-wider text-black border-b-2 border-slate-300 pb-1.5 flex items-center gap-2">
+                    <span className="bg-blue-600 text-white font-mono font-bold w-4 h-4 rounded-full flex items-center justify-center text-[10px]">1</span>
+                    CẤU HÌNH TRANG & DÒNG TIÊU ĐỀ
+                  </h4>
+
+                  <div className="space-y-3">
+                    {/* Sheet selection */}
+                    <div>
+                      <label className="text-[10px] font-black uppercase text-slate-500 block mb-1">Chọn trang tính (Active Sheet):</label>
+                      <select 
+                        value={excelWizard.selectedSheet} 
+                        onChange={(e) => handleWizardSheetChange(e.target.value)} 
+                        className="w-full border-2 border-[#141414] bg-white p-2 text-xs font-black text-black focus:outline-none"
+                      >
+                        {excelWizard.sheetNames.map(s => <option key={s} value={s}>{s}</option>)}
+                      </select>
+                    </div>
+
+                    {/* Header Row Index selection */}
+                    <div>
+                      <label className="text-[10px] font-black uppercase text-slate-500 block mb-1">Dòng tiêu đề (Header Row Index - 1-based):</label>
+                      <div className="flex gap-2 items-center">
+                        <input 
+                          type="number" 
+                          min="1" 
+                          max="30"
+                          value={excelWizard.headerRowIndex + 1} 
+                          onChange={(e) => handleWizardHeaderRowChange(Math.max(0, parseInt(e.target.value) - 1))}
+                          className="w-20 border-2 border-[#141414] bg-white p-1.5 text-xs font-black text-center focus:outline-none"
+                        />
+                        <span className="text-[10px] text-slate-500 font-bold">Dòng thực tế chứa tiêu đề chính của bảng</span>
+                      </div>
+                    </div>
+
+                    {/* Header Rows Count (1 or 2 rows for merge headers) */}
+                    <div>
+                      <label className="text-[10px] font-black uppercase text-slate-500 block mb-1">Số lượng dòng tiêu đề:</label>
+                      <div className="flex gap-4">
+                        <label className="flex items-center gap-2 cursor-pointer font-bold text-xs">
+                          <input 
+                          type="radio" 
+                          name="headerRowsCount" 
+                          checked={excelWizard.headerRowsCount === 1}
+                          onChange={() => handleWizardHeaderCountChange(1)}
+                          className="accent-black"
+                        />
+                        <span>1 dòng đơn lẻ (Phổ biến)</span>
+                      </label>
+                      <label className="flex items-center gap-2 cursor-pointer font-bold text-xs">
+                        <input 
+                          type="radio" 
+                          name="headerRowsCount" 
+                          checked={excelWizard.headerRowsCount === 2}
+                          onChange={() => handleWizardHeaderCountChange(2)}
+                          className="accent-black"
+                        />
+                        <span>2 dòng ghép lại (Merged)</span>
+                      </label>
+                    </div>
+                  </div>
+                  </div>
+                </div>
+
+                {/* Right Panel: Headers Preview after cleaning */}
+                <div className="space-y-4 border-2 border-[#141414] p-4 bg-slate-50 shadow-[4px_4px_0px_#141414]">
+                  <h4 className="font-black text-xs uppercase tracking-wider text-black border-b-2 border-slate-300 pb-1.5 flex items-center gap-2">
+                    <span className="bg-blue-600 text-white font-mono font-bold w-4 h-4 rounded-full flex items-center justify-center text-[10px]">2</span>
+                    DANH SÁCH CỘT PHÁT HIỆN ({excelWizard.headersCleaned.length})
+                  </h4>
+
+                  <div className="text-[10px] text-slate-500 font-bold">
+                    Tên cột đã được chuẩn hóa tự động (loại bỏ khoảng trắng dư thừa, xử lý ghép cell rỗng, trùng tên tự thêm hậu tố):
+                  </div>
+
+                  <div className="max-h-40 overflow-y-auto border border-slate-300 p-2 bg-white rounded divide-y divide-slate-100 font-mono text-[10px] text-slate-700">
+                    {excelWizard.headersCleaned.map((col, idx) => (
+                      <div key={idx} className="py-1 flex justify-between items-center hover:bg-slate-50 px-1">
+                        <span className="text-slate-400 font-bold">Cột {idx + 1}:</span>
+                        <span className="font-bold text-black">{col || <span className="text-red-500 bg-red-50 px-1 italic">Vô danh / Trống</span>}</span>
+                      </div>
+                    ))}
+                  </div>
+                </div>
+
+              </div>
+
+              {/* Data Row preview directly below header */}
+              <div className="space-y-2.5">
+                <h4 className="font-black text-xs uppercase tracking-wider text-black flex items-center gap-2">
+                  <span className="bg-blue-600 text-white font-mono font-bold w-4 h-4 rounded-full flex items-center justify-center text-[10px]">3</span>
+                  XEM TRƯỚC SỐ LIỆU THỰC TẾ (PREVIEW)
+                </h4>
+                <p className="text-[10px] text-slate-500 font-bold uppercase">Kiểm tra xem dữ liệu có bị lệch cột, lệch dòng hoặc nhận nhầm tiêu đề không:</p>
+
+                <div className="overflow-x-auto border-2 border-[#141414] max-h-64">
+                  <table className="w-full text-left text-xs border-collapse">
+                    <thead>
+                      <tr className="bg-[#f0f0ed] border-b-2 border-[#141414] font-black uppercase text-black font-mono text-[10px]">
+                        <th className="p-2 border-r border-[#141414] text-center w-12">STT</th>
+                        {excelWizard.headersCleaned.map((col, idx) => (
+                          <th key={idx} className="p-2 border-r border-[#141414] min-w-[120px] max-w-[200px] truncate">{col || `Cột ${idx + 1}`}</th>
+                        ))}
+                      </tr>
+                    </thead>
+                    <tbody className="divide-y divide-[#141414]/15 font-mono text-[10px]">
+                      {excelWizard.rowsPreview.map((row, rIdx) => {
+                        const isHeaderHighlight = rIdx === excelWizard.headerRowIndex;
+                        return (
+                          <tr 
+                            key={rIdx} 
+                            className={`${isHeaderHighlight ? "bg-yellow-100 font-black text-black" : "hover:bg-slate-50 text-slate-600"}`}
+                          >
+                            <td className="p-2 border-r border-[#141414]/15 text-center font-bold bg-[#fdfdfb]">
+                              {rIdx + 1}
+                              {isHeaderHighlight && <span className="block text-[8px] text-amber-800 bg-amber-100 border border-amber-300 rounded px-0.5 mt-0.5">Tiêu đề</span>}
+                            </td>
+                            {excelWizard.headersCleaned.map((_, colIdx) => (
+                              <td key={colIdx} className="p-2 border-r border-[#141414]/15 max-w-[200px] truncate">
+                                {row[colIdx] !== undefined ? String(row[colIdx]) : ""}
+                              </td>
+                            ))}
+                          </tr>
+                        );
+                      })}
+                    </tbody>
+                  </table>
+                </div>
+              </div>
+            </div>
+
+            {/* Modal Actions Footer */}
+            <div className="bg-[#f0f0ed] border-t-4 border-[#141414] p-4 px-6 flex justify-between items-center">
+              <button 
+                onClick={excelWizard.onCancel} 
+                className="bg-white hover:bg-[#e4e4e2] text-black border-2 border-[#141414] text-xs font-black uppercase px-6 py-2.5 shadow-[3px_3px_0px_#141414] active:translate-y-0.5 transition cursor-pointer"
+              >
+                HỦY BỎ
+              </button>
+              <button 
+                onClick={handleConfirmWizard} 
+                className="bg-[#00ff00] hover:bg-[#05e005] text-black border-2 border-[#141414] text-xs font-black uppercase px-8 py-2.5 shadow-[4px_4px_0px_#141414] hover:shadow-[6px_6px_0px_#141414] hover:translate-y-[-2px] active:translate-y-0 transition cursor-pointer"
+              >
+                XÁC NHẬN CẤU TRÚC & NẠP DỮ LIỆU ✔
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
       {/* --- TOP NOTIFICATION BANNER --- */}
       {notification && (
         <div className={`fixed top-4 right-4 z-50 px-5 py-3 rounded-none shadow-[4px_4px_0px_#141414] border-2 border-[#141414] flex items-center gap-3 transition-all ${
@@ -2015,6 +3081,38 @@ export default function App() {
                       </div>
                     </div>
 
+                    {/* Audit Details Summary for Partner */}
+                    {partnerAuditDetails && (
+                      <div className="mt-3 p-3 bg-slate-50 border border-slate-300 space-y-1.5 text-xs font-mono text-slate-700">
+                        <div className="font-bold text-black border-b border-dashed border-slate-300 pb-1 flex justify-between items-center">
+                          <span>⚙️ Cấu trúc file đối tác:</span>
+                          <button onClick={() => handleReopenWizard("partner")} className="text-blue-600 hover:underline font-black uppercase text-[10px]">Cấu hình lại</button>
+                        </div>
+                        <div className="grid grid-cols-2 gap-2 text-xs">
+                          <div>• Sheet: <span className="text-black font-bold">{partnerAuditDetails.sheetName}</span></div>
+                          <div>• Dòng tiêu đề: <span className="text-black font-bold">Dòng {partnerAuditDetails.headerRow}</span></div>
+                          <div>• Số cột: <span className="text-black font-bold">{partnerAuditDetails.totalColumns} cột</span></div>
+                          <div>• Số dòng: <span className="text-black font-bold">{partnerAuditDetails.totalRows} dòng</span></div>
+                        </div>
+                        {partnerAuditDetails.renamedColumns.length > 0 && (
+                          <div className="mt-1">
+                            <span className="font-bold text-amber-700">⚠️ Chuẩn hóa tên cột:</span>
+                            <ul className="list-disc pl-3 text-xs text-amber-800 space-y-0.5 mt-0.5 max-h-24 overflow-y-auto">
+                              {partnerAuditDetails.renamedColumns.map((col, idx) => <li key={idx}>{col}</li>)}
+                            </ul>
+                          </div>
+                        )}
+                        {partnerAuditDetails.emptyColumns.length > 0 && (
+                          <div className="mt-1">
+                            <span className="font-bold text-slate-500">🗑️ Cột rỗng không dữ liệu ({partnerAuditDetails.emptyColumns.length}):</span>
+                            <div className="text-xs text-slate-500 truncate mt-0.5" title={partnerAuditDetails.emptyColumns.join(", ")}>
+                              {partnerAuditDetails.emptyColumns.join(", ")}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    )}
+
                     <button
                       onClick={handleProcessPartners}
                       disabled={isProcessingPartners}
@@ -2158,160 +3256,511 @@ export default function App() {
 
           {/* --- TAB CONTENT 4: BANK LOGS CONFIG --- */}
           {currentTab === "bank" && (
-            <div className="space-y-6">
-              <div className="bg-white border-2 border-[#141414] p-6 shadow-[4px_4px_0px_#141414] space-y-4">
-                <h3 className="font-black text-xs uppercase tracking-wider text-black border-b-2 border-[#141414] pb-2">Hạch toán sao kê ngân hàng</h3>
-                <p className="text-xs text-slate-500">Tự lọc và phân bổ tự động nội dung giao dịch ngân hàng theo nghiệp vụ công nợ.</p>
+            <ErrorBoundary fallbackTitle="LỖI TRONG PHÂN HỆ NGÂN QUỸ / SAO KÊ" onReset={() => setExcelWizard(null)}>
+              <div className="space-y-6">
+              <div className="bg-[#141414] text-white border-2 border-transparent shadow-[4px_4px_0px_#ccc] p-6 space-y-2">
+                <span className="bg-[#00ff00] text-black text-[10px] font-black uppercase tracking-wider px-2 py-0.5 border border-[#141414]">Nghiệp vụ hạch toán & đối chiếu đa chiều</span>
+                <h3 className="text-xl font-black uppercase tracking-tight mt-1">Gắn mã đối tác & đối chiếu hóa đơn tự động</h3>
+                <p className="text-slate-300 text-xs">
+                  Bổ sung tính năng đối soát dòng ngân quỹ với bảng kê bán ra (doanh thu) và bảng kê mua vào (chi phí). Thuật toán tự động tìm tổ hợp tối đa 5 hóa đơn, khớp theo Mã số thuế, tài khoản đối ứng, tên tương đồng, ngày lệch trước/sau và chênh lệch sai số số tiền nhỏ.
+                </p>
+              </div>
 
-                {bankSourceRows.length === 0 ? (
-                  <div className="border-2 border-dashed border-[#141414] p-8 text-center bg-[#fdfdfb] flex flex-col items-center justify-center">
-                    <UploadCloud size={32} className="text-[#141414] mb-2" />
-                    <p className="text-xs font-bold text-black uppercase tracking-wide">Tải lên tệp sao kê ngân hàng .XLSX/.CSV</p>
-                    <p className="text-[10px] text-slate-500 font-bold uppercase mt-1 mb-4">Hoặc nhấn nút tải dữ liệu demo mẫu</p>
-                    <label className="bg-[#00ff00] hover:bg-[#05e005] text-black text-xs font-black uppercase tracking-wider px-6 py-2.5 border-2 border-[#141414] shadow-[4px_4px_0px_#141414] hover:shadow-[6px_6px_0px_#141414] hover:translate-y-[-2px] active:translate-y-0 transition cursor-pointer inline-flex items-center gap-2">
-                      <FileSpreadsheet size={14} />
-                      Chọn tệp từ thiết bị
-                      <input
-                        type="file"
-                        accept=".xlsx,.xls,.csv"
-                        className="hidden"
-                        onChange={(e) => handleGenericFileUpload(e, "bank")}
-                      />
-                    </label>
-                  </div>
-                ) : (
-                  <div className="space-y-4">
-                    <div className="flex justify-between items-center bg-[#f0f0ed] p-2 border-2 border-[#141414]">
-                      <span className="text-[10px] font-black text-black uppercase font-mono">Tệp hiện tại: {uploadedFileName || "Dữ liệu mẫu"}</span>
-                      <label className="bg-yellow-300 hover:bg-yellow-400 text-black text-[10px] font-black uppercase tracking-wider px-2.5 py-1 border border-black shadow-[2px_2px_0px_#141414] hover:translate-y-[-1px] active:translate-y-0 transition cursor-pointer inline-flex items-center gap-1">
-                        <FileSpreadsheet size={12} />
-                        Thay đổi tệp
-                        <input
-                          type="file"
-                          accept=".xlsx,.xls,.csv"
-                          className="hidden"
-                          onChange={(e) => handleGenericFileUpload(e, "bank")}
-                        />
-                      </label>
+              {/* Grid 3 File Upload Modules */}
+              <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
+                
+                {/* File 1: Sao kê ngân hàng */}
+                <div className="bg-white border-2 border-[#141414] p-5 shadow-[4px_4px_0px_#141414] space-y-4 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 mb-2 border-b-2 border-[#141414] pb-2">
+                      <span className="bg-amber-300 text-black border border-black p-1 text-[10px] font-bold">TỆP 1</span>
+                      <h4 className="text-xs font-black uppercase text-black tracking-wider">SAO KÊ NGÂN HÀNG (QUỸ)</h4>
                     </div>
-
-                    {/* Cấu hình ánh xạ cột sao kê ngân quỹ */}
-                    <div className="bg-[#f0f0ed] p-4.5 border-2 border-[#141414] space-y-3">
-                      <h4 className="text-xs font-black uppercase text-black tracking-wider">Cấu hình ánh xạ cột sao kê:</h4>
-                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
-                        <div>
-                          <label className="text-[10px] uppercase font-black text-slate-500">Nội dung giao dịch *</label>
-                          <select
-                            value={bankMappings.noi_dung_giao_dich}
-                            onChange={(e) => setBankMappings({ ...bankMappings, noi_dung_giao_dich: e.target.value })}
-                            className="w-full mt-1 border-2 border-[#141414] bg-white p-1.5 focus:outline-none font-bold text-black text-[11px]"
+                    {bankSourceRows.length === 0 ? (
+                      <div className="border-2 border-dashed border-[#141414]/30 p-6 text-center bg-[#fdfdfb]">
+                        <UploadCloud size={24} className="text-[#141414] mx-auto mb-2" />
+                        <p className="text-[10px] font-black uppercase tracking-wider text-black">Chưa tải tệp sao kê</p>
+                        <p className="text-[9px] text-slate-400 uppercase font-bold mt-1 mb-3">(.XLSX / .CSV)</p>
+                        <label className="bg-[#00ff00] hover:bg-[#05e005] text-black text-[9px] font-black uppercase tracking-wider px-3 py-1.5 border-2 border-[#141414] shadow-[2px_2px_0px_#141414] hover:translate-y-[-1px] transition cursor-pointer inline-block">
+                          Chọn tệp
+                          <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => handleGenericFileUpload(e, "bank")} />
+                        </label>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="bg-emerald-50 border border-emerald-300 p-2 text-[10px] font-mono text-emerald-800 flex justify-between items-center">
+                          <span className="truncate max-w-[150px] font-bold">📄 {uploadedFileName || "Dữ liệu mẫu"}</span>
+                          <span className="bg-emerald-800 text-white font-bold px-1.5 py-0.2 rounded-sm">{bankSourceRows.length} GD</span>
+                        </div>
+                        {/* Mapping Actions */}
+                        <div className="flex gap-2 justify-between">
+                          <button
+                            onClick={handleRestoreAutoMapping}
+                            className="bg-yellow-100 hover:bg-yellow-200 text-black border border-black px-1.5 py-0.5 text-[8px] font-black uppercase tracking-wider"
+                            title="Tự động tìm kiếm và đối chiếu tên cột tối ưu nhất dựa trên từ khóa"
                           >
-                            {getColumnOptions(bankHeaders, bankMappings.noi_dung_giao_dich)}
-                          </select>
+                            ⚡ Ánh xạ tối ưu
+                          </button>
+                          <button
+                            onClick={handleClearMapping}
+                            className="bg-red-50 hover:bg-red-100 text-red-700 border border-red-300 px-1.5 py-0.5 text-[8px] font-black uppercase tracking-wider"
+                          >
+                            🗑️ Xóa ánh xạ
+                          </button>
+                        </div>
+                        {/* Mapping */}
+                        <div className="space-y-1 text-[10px]">
+                          <span className="font-black uppercase text-slate-500">Cấu hình ánh xạ cột sao kê:</span>
+                          
+                          {/* Core columns */}
+                          <div className="border border-slate-300 p-1.5 rounded bg-slate-50/50 space-y-1">
+                            <span className="text-[8px] font-black uppercase text-slate-400 block border-b border-slate-200 pb-0.5">Cột chính (Bắt buộc)</span>
+                            <div className="grid grid-cols-2 gap-1.5">
+                              <div>
+                                <label className="text-[7.5px] uppercase font-bold text-slate-500">Nội dung GD *</label>
+                                <select value={bankMappings.noi_dung_giao_dich} onChange={(e) => setBankMappings({ ...bankMappings, noi_dung_giao_dich: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none font-bold text-[9px]">
+                                  <option value="">--Không chọn--</option>
+                                  {getColumnOptions(bankHeaders, bankMappings.noi_dung_giao_dich)}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-[7.5px] uppercase font-bold text-slate-500">Thu (Có)</label>
+                                <select value={bankMappings.so_tien_thu} onChange={(e) => setBankMappings({ ...bankMappings, so_tien_thu: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none font-bold text-[9px]">
+                                  <option value="">--Không chọn--</option>
+                                  {getColumnOptions(bankHeaders, bankMappings.so_tien_thu)}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-[7.5px] uppercase font-bold text-slate-500">Chi (Nợ)</label>
+                                <select value={bankMappings.so_tien_chi} onChange={(e) => setBankMappings({ ...bankMappings, so_tien_chi: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none font-bold text-[9px]">
+                                  <option value="">--Không chọn--</option>
+                                  {getColumnOptions(bankHeaders, bankMappings.so_tien_chi)}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-[7.5px] uppercase font-bold text-slate-500">TK đối ứng</label>
+                                <select value={bankMappings.so_tai_khoan_doi_ung} onChange={(e) => setBankMappings({ ...bankMappings, so_tai_khoan_doi_ung: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none font-bold text-[9px]">
+                                  <option value="">--Không chọn--</option>
+                                  {getColumnOptions(bankHeaders, bankMappings.so_tai_khoan_doi_ung)}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-[7.5px] uppercase font-bold text-slate-500">Tên ĐT sao kê</label>
+                                <select value={bankMappings.ten_doi_tac_sao_ke} onChange={(e) => setBankMappings({ ...bankMappings, ten_doi_tac_sao_ke: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none font-bold text-[9px]">
+                                  <option value="">--Không chọn--</option>
+                                  {getColumnOptions(bankHeaders, bankMappings.ten_doi_tac_sao_ke)}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-[7.5px] uppercase font-bold text-slate-500">Ngày giao dịch</label>
+                                <select value={bankMappings.ngay_giao_dich} onChange={(e) => setBankMappings({ ...bankMappings, ngay_giao_dich: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none font-bold text-[9px]">
+                                  <option value="">--Không chọn--</option>
+                                  {getColumnOptions(bankHeaders, bankMappings.ngay_giao_dich)}
+                                </select>
+                              </div>
+                            </div>
+                            <div className="bg-amber-50 border border-dashed border-amber-200 p-1 rounded mt-1.5 space-y-1">
+                              <span className="text-[7.5px] font-bold uppercase text-amber-800 block">Nếu cột ngày bị tách rời (Ngày / Tháng / Năm):</span>
+                              <div className="grid grid-cols-3 gap-1">
+                                <div>
+                                  <label className="text-[6.5px] uppercase font-bold text-slate-400">Cột Ngày</label>
+                                  <select value={bankMappings.cot_ngay} onChange={(e) => setBankMappings({ ...bankMappings, cot_ngay: e.target.value })} className="w-full border border-[#141414] bg-white p-0.2 focus:outline-none text-[8.5px]">
+                                    <option value="">-</option>
+                                    {getColumnOptions(bankHeaders, bankMappings.cot_ngay)}
+                                  </select>
+                                </div>
+                                <div>
+                                  <label className="text-[6.5px] uppercase font-bold text-slate-400">Cột Tháng</label>
+                                  <select value={bankMappings.cot_thang} onChange={(e) => setBankMappings({ ...bankMappings, cot_thang: e.target.value })} className="w-full border border-[#141414] bg-white p-0.2 focus:outline-none text-[8.5px]">
+                                    <option value="">-</option>
+                                    {getColumnOptions(bankHeaders, bankMappings.cot_thang)}
+                                  </select>
+                                </div>
+                                <div>
+                                  <label className="text-[6.5px] uppercase font-bold text-slate-400">Cột Năm</label>
+                                  <select value={bankMappings.cot_nam} onChange={(e) => setBankMappings({ ...bankMappings, cot_nam: e.target.value })} className="w-full border border-[#141414] bg-white p-0.2 focus:outline-none text-[8.5px]">
+                                    <option value="">-</option>
+                                    {getColumnOptions(bankHeaders, bankMappings.cot_nam)}
+                                  </select>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+
+                          {/* Secondary columns */}
+                          <div className="border border-slate-300 p-1.5 rounded bg-slate-50/50 space-y-1 mt-1.5">
+                            <span className="text-[8px] font-black uppercase text-slate-400 block border-b border-slate-200 pb-0.5">Cột phụ trợ (Để đối chiếu nâng cao)</span>
+                            <div className="grid grid-cols-2 gap-1.5">
+                              <div>
+                                <label className="text-[7.5px] uppercase font-bold text-slate-400">Ngày hạch toán</label>
+                                <select value={bankMappings.ngay_hach_toan} onChange={(e) => setBankMappings({ ...bankMappings, ngay_hach_toan: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none text-[8.5px]">
+                                  <option value="">--Không chọn--</option>
+                                  {getColumnOptions(bankHeaders, bankMappings.ngay_hach_toan)}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-[7.5px] uppercase font-bold text-slate-400">Ngày hiệu lực</label>
+                                <select value={bankMappings.ngay_hieu_luc} onChange={(e) => setBankMappings({ ...bankMappings, ngay_hieu_luc: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none text-[8.5px]">
+                                  <option value="">--Không chọn--</option>
+                                  {getColumnOptions(bankHeaders, bankMappings.ngay_hieu_luc)}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-[7.5px] uppercase font-bold text-slate-400">Số dư</label>
+                                <select value={bankMappings.so_du} onChange={(e) => setBankMappings({ ...bankMappings, so_du: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none text-[8.5px]">
+                                  <option value="">--Không chọn--</option>
+                                  {getColumnOptions(bankHeaders, bankMappings.so_du)}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-[7.5px] uppercase font-bold text-slate-400">Mã giao dịch</label>
+                                <select value={bankMappings.ma_giao_dich} onChange={(e) => setBankMappings({ ...bankMappings, ma_giao_dich: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none text-[8.5px]">
+                                  <option value="">--Không chọn--</option>
+                                  {getColumnOptions(bankHeaders, bankMappings.ma_giao_dich)}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-[7.5px] uppercase font-bold text-slate-400">Số chứng từ</label>
+                                <select value={bankMappings.so_chung_tu} onChange={(e) => setBankMappings({ ...bankMappings, so_chung_tu: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none text-[8.5px]">
+                                  <option value="">--Không chọn--</option>
+                                  {getColumnOptions(bankHeaders, bankMappings.so_chung_tu)}
+                                </select>
+                              </div>
+                              <div>
+                                <label className="text-[7.5px] uppercase font-bold text-slate-400">Số tham chiếu</label>
+                                <select value={bankMappings.so_tham_chieu} onChange={(e) => setBankMappings({ ...bankMappings, so_tham_chieu: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none text-[8.5px]">
+                                  <option value="">--Không chọn--</option>
+                                  {getColumnOptions(bankHeaders, bankMappings.so_tham_chieu)}
+                                </select>
+                              </div>
+                            </div>
+                          </div>
                         </div>
 
-                        <div>
-                          <label className="text-[10px] uppercase font-black text-slate-500">Số tiền thu (Có)</label>
-                          <select
-                            value={bankMappings.so_tien_thu}
-                            onChange={(e) => setBankMappings({ ...bankMappings, so_tien_thu: e.target.value })}
-                            className="w-full mt-1 border-[#141414] border-2 bg-white p-1.5 focus:outline-none font-bold text-black text-[11px]"
-                          >
-                            {getColumnOptions(bankHeaders, bankMappings.so_tien_thu)}
-                          </select>
-                        </div>
+                        {/* Audit Details Summary */}
+                        {bankAuditDetails && (
+                          <div className="mt-3 p-2.5 bg-slate-50 border border-slate-300 space-y-1 text-[9px] font-mono text-slate-700">
+                            <div className="font-bold text-black border-b border-dashed border-slate-300 pb-1 flex justify-between items-center">
+                              <span>⚙️ Cấu trúc file sao kê:</span>
+                              <button onClick={() => handleReopenWizard("bank")} className="text-blue-600 hover:underline font-black uppercase text-[8px]">Cấu hình lại</button>
+                            </div>
+                            <div className="grid grid-cols-2 gap-1 text-[8.5px]">
+                              <div>• Sheet: <span className="text-black font-bold">{bankAuditDetails.sheetName}</span></div>
+                              <div>• Dòng tiêu đề: <span className="text-black font-bold">Dòng {bankAuditDetails.headerRow}</span></div>
+                              <div>• Số cột: <span className="text-black font-bold">{bankAuditDetails.totalColumns} cột</span></div>
+                              <div>• Số dòng: <span className="text-black font-bold">{bankAuditDetails.totalRows} dòng</span></div>
+                            </div>
+                            {bankAuditDetails.renamedColumns.length > 0 && (
+                              <div className="mt-1">
+                                <span className="font-bold text-amber-700">⚠️ Chuẩn hóa tên cột:</span>
+                                <ul className="list-disc pl-3 text-[8px] text-amber-800 space-y-0.5 mt-0.5 max-h-16 overflow-y-auto">
+                                  {bankAuditDetails.renamedColumns.map((col, idx) => <li key={idx}>{col}</li>)}
+                                </ul>
+                              </div>
+                            )}
+                            {bankAuditDetails.emptyColumns.length > 0 && (
+                              <div className="mt-1">
+                                <span className="font-bold text-slate-500">🗑️ Cột rỗng không dữ liệu ({bankAuditDetails.emptyColumns.length}):</span>
+                                <div className="text-[8px] text-slate-500 truncate mt-0.5" title={bankAuditDetails.emptyColumns.join(", ")}>
+                                  {bankAuditDetails.emptyColumns.join(", ")}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
+                  {bankSourceRows.length > 0 && (
+                    <label className="w-full text-center bg-white hover:bg-[#f0f0ed] text-black text-[9px] font-black uppercase tracking-wider py-1 border border-dashed border-[#141414] transition cursor-pointer">
+                      Thay đổi tệp sao kê
+                      <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => handleGenericFileUpload(e, "bank")} />
+                    </label>
+                  )}
+                </div>
 
-                        <div>
-                          <label className="text-[10px] uppercase font-black text-slate-500">Số tiền chi (Nợ)</label>
-                          <select
-                            value={bankMappings.so_tien_chi}
-                            onChange={(e) => setBankMappings({ ...bankMappings, so_tien_chi: e.target.value })}
-                            className="w-full mt-1 border-[#141414] border-2 bg-white p-1.5 focus:outline-none font-bold text-black text-[11px]"
-                          >
-                            {getColumnOptions(bankHeaders, bankMappings.so_tien_chi)}
-                          </select>
+                {/* File 2: Bảng kê bán ra (Hóa đơn doanh thu) */}
+                <div className="bg-white border-2 border-[#141414] p-5 shadow-[4px_4px_0px_#141414] space-y-4 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 mb-2 border-b-2 border-[#141414] pb-2">
+                      <span className="bg-cyan-300 text-black border border-black p-1 text-[10px] font-bold">TỆP 2</span>
+                      <h4 className="text-xs font-black uppercase text-black tracking-wider">BẢNG KÊ BÁN RA (DOANH THU)</h4>
+                    </div>
+                    {bankSalesRows.length === 0 ? (
+                      <div className="border-2 border-dashed border-[#141414]/30 p-6 text-center bg-[#fdfdfb]">
+                        <UploadCloud size={24} className="text-[#141414] mx-auto mb-2" />
+                        <p className="text-[10px] font-black uppercase tracking-wider text-black">Chưa tải bảng bán ra</p>
+                        <p className="text-[9px] text-slate-400 uppercase font-bold mt-1 mb-3">(.XLSX / .CSV)</p>
+                        <label className="bg-[#00ff00] hover:bg-[#05e005] text-black text-[9px] font-black uppercase tracking-wider px-3 py-1.5 border-2 border-[#141414] shadow-[2px_2px_0px_#141414] hover:translate-y-[-1px] transition cursor-pointer inline-block">
+                          Chọn tệp
+                          <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => handleGenericFileUpload(e, "bank_sales")} />
+                        </label>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="bg-cyan-50 border border-cyan-300 p-2 text-[10px] font-mono text-cyan-800 flex justify-between items-center">
+                          <span className="truncate max-w-[150px] font-bold">📄 {bankSalesFileName || "Doanh_thu_demo.xlsx"}</span>
+                          <span className="bg-cyan-800 text-white font-bold px-1.5 py-0.2 rounded-sm">{bankSalesRows.length} HĐ</span>
                         </div>
-
-                        <div>
-                          <label className="text-[10px] uppercase font-black text-slate-500">Tài khoản đối ứng</label>
-                          <select
-                            value={bankMappings.so_tai_khoan_doi_ung}
-                            onChange={(e) => setBankMappings({ ...bankMappings, so_tai_khoan_doi_ung: e.target.value })}
-                            className="w-full mt-1 border-[#141414] border-2 bg-white p-1.5 focus:outline-none font-bold text-black text-[11px]"
-                          >
-                            {getColumnOptions(bankHeaders, bankMappings.so_tai_khoan_doi_ung)}
-                          </select>
-                        </div>
-
-                        <div>
-                          <label className="text-[10px] uppercase font-black text-slate-500">Đối tác sao kê</label>
-                          <select
-                            value={bankMappings.ten_doi_tac_sao_ke}
-                            onChange={(e) => setBankMappings({ ...bankMappings, ten_doi_tac_sao_ke: e.target.value })}
-                            className="w-full mt-1 border-[#141414] border-2 bg-white p-1.5 focus:outline-none font-bold text-black text-[11px]"
-                          >
-                            {getColumnOptions(bankHeaders, bankMappings.ten_doi_tac_sao_ke)}
-                          </select>
+                        {/* Mapping */}
+                        <div className="space-y-1 text-[10px]">
+                          <span className="font-black uppercase text-slate-500">Ánh xạ cột bán ra:</span>
+                          <div className="grid grid-cols-2 gap-2 mt-1">
+                            <div>
+                              <label className="text-[8px] uppercase font-bold text-slate-400">Số hóa đơn *</label>
+                              <select value={bankSalesMappings.so_hoa_don} onChange={(e) => setBankSalesMappings({ ...bankSalesMappings, so_hoa_don: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none font-bold text-[10px]">
+                                {getColumnOptions(bankSalesHeaders, bankSalesMappings.so_hoa_don)}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="text-[8px] uppercase font-bold text-slate-400">Ngày hóa đơn</label>
+                              <select value={bankSalesMappings.ngay_hoa_don} onChange={(e) => setBankSalesMappings({ ...bankSalesMappings, ngay_hoa_don: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none font-bold text-[10px]">
+                                {getColumnOptions(bankSalesHeaders, bankSalesMappings.ngay_hoa_don)}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="text-[8px] uppercase font-bold text-slate-400">Tên khách hàng</label>
+                              <select value={bankSalesMappings.ten_khach_hang} onChange={(e) => setBankSalesMappings({ ...bankSalesMappings, ten_khach_hang: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none font-bold text-[10px]">
+                                {getColumnOptions(bankSalesHeaders, bankSalesMappings.ten_khach_hang)}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="text-[8px] uppercase font-bold text-slate-400">Tổng thanh toán</label>
+                              <select value={bankSalesMappings.tong_thanh_toan} onChange={(e) => setBankSalesMappings({ ...bankSalesMappings, tong_thanh_toan: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none font-bold text-[10px]">
+                                {getColumnOptions(bankSalesHeaders, bankSalesMappings.tong_thanh_toan)}
+                              </select>
+                            </div>
+                          </div>
                         </div>
                       </div>
-                    </div>
-                    <button
-                      onClick={handleProcessBank}
-                      disabled={isProcessingBank}
-                      className="w-full bg-[#141414] text-white hover:bg-black hover:shadow-[6px_6px_0px_#00ff00] hover:translate-y-[-2px] text-xs font-black uppercase py-3.5 px-4 border-2 border-[#141414] shadow-[4px_4px_0px_#00ff00] transition flex items-center justify-center gap-2 cursor-pointer"
-                    >
-                      {isProcessingBank ? (
-                        <>
-                          <RefreshCw size={14} className="animate-spin text-white grow-0" />
-                          <span>Đang giải mã và định lớp luồng tiền...</span>
-                        </>
-                      ) : (
-                        <>
-                          <Play size={14} className="text-[#00ff00]" />
-                          <span>Bắt đầu hạch toán sao kê</span>
-                        </>
-                      )}
-                    </button>
+                    )}
                   </div>
-                )}
+                  {bankSalesRows.length > 0 && (
+                    <label className="w-full text-center bg-white hover:bg-[#f0f0ed] text-black text-[9px] font-black uppercase tracking-wider py-1 border border-dashed border-[#141414] transition cursor-pointer">
+                      Thay đổi tệp bán ra
+                      <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => handleGenericFileUpload(e, "bank_sales")} />
+                    </label>
+                  )}
+                </div>
+
+                {/* File 3: Bảng kê mua vào (Hóa đơn chi phí) */}
+                <div className="bg-white border-2 border-[#141414] p-5 shadow-[4px_4px_0px_#141414] space-y-4 flex flex-col justify-between">
+                  <div>
+                    <div className="flex items-center gap-2 mb-2 border-b-2 border-[#141414] pb-2">
+                      <span className="bg-purple-300 text-black border border-black p-1 text-[10px] font-bold">TỆP 3</span>
+                      <h4 className="text-xs font-black uppercase text-black tracking-wider">BẢNG KÊ MUA VÀO (CHI PHÍ)</h4>
+                    </div>
+                    {bankPurchasesRows.length === 0 ? (
+                      <div className="border-2 border-dashed border-[#141414]/30 p-6 text-center bg-[#fdfdfb]">
+                        <UploadCloud size={24} className="text-[#141414] mx-auto mb-2" />
+                        <p className="text-[10px] font-black uppercase tracking-wider text-black">Chưa tải bảng mua vào</p>
+                        <p className="text-[9px] text-slate-400 uppercase font-bold mt-1 mb-3">(.XLSX / .CSV)</p>
+                        <label className="bg-[#00ff00] hover:bg-[#05e005] text-black text-[9px] font-black uppercase tracking-wider px-3 py-1.5 border-2 border-[#141414] shadow-[2px_2px_0px_#141414] hover:translate-y-[-1px] transition cursor-pointer inline-block">
+                          Chọn tệp
+                          <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => handleGenericFileUpload(e, "bank_purchases")} />
+                        </label>
+                      </div>
+                    ) : (
+                      <div className="space-y-3">
+                        <div className="bg-purple-50 border border-purple-300 p-2 text-[10px] font-mono text-purple-800 flex justify-between items-center">
+                          <span className="truncate max-w-[150px] font-bold">📄 {bankPurchasesFileName || "Chi_phi_demo.xlsx"}</span>
+                          <span className="bg-purple-800 text-white font-bold px-1.5 py-0.2 rounded-sm">{bankPurchasesRows.length} HĐ</span>
+                        </div>
+                        {/* Mapping */}
+                        <div className="space-y-1 text-[10px]">
+                          <span className="font-black uppercase text-slate-500">Ánh xạ cột mua vào:</span>
+                          <div className="grid grid-cols-2 gap-2 mt-1">
+                            <div>
+                              <label className="text-[8px] uppercase font-bold text-slate-400">Số hóa đơn *</label>
+                              <select value={bankPurchasesMappings.so_hoa_don} onChange={(e) => setBankPurchasesMappings({ ...bankPurchasesMappings, so_hoa_don: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none font-bold text-[10px]">
+                                {getColumnOptions(bankPurchasesHeaders, bankPurchasesMappings.so_hoa_don)}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="text-[8px] uppercase font-bold text-slate-400">Ngày hóa đơn</label>
+                              <select value={bankPurchasesMappings.ngay_hoa_don} onChange={(e) => setBankPurchasesMappings({ ...bankPurchasesMappings, ngay_hoa_don: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none font-bold text-[10px]">
+                                {getColumnOptions(bankPurchasesHeaders, bankPurchasesMappings.ngay_hoa_don)}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="text-[8px] uppercase font-bold text-slate-400">Tên NCC</label>
+                              <select value={bankPurchasesMappings.ten_nha_cung_cap} onChange={(e) => setBankPurchasesMappings({ ...bankPurchasesMappings, ten_nha_cung_cap: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none font-bold text-[10px]">
+                                {getColumnOptions(bankPurchasesHeaders, bankPurchasesMappings.ten_nha_cung_cap)}
+                              </select>
+                            </div>
+                            <div>
+                              <label className="text-[8px] uppercase font-bold text-slate-400">Tổng thanh toán</label>
+                              <select value={bankPurchasesMappings.tong_thanh_toan} onChange={(e) => setBankPurchasesMappings({ ...bankPurchasesMappings, tong_thanh_toan: e.target.value })} className="w-full border border-black bg-white p-0.5 focus:outline-none font-bold text-[10px]">
+                                {getColumnOptions(bankPurchasesHeaders, bankPurchasesMappings.tong_thanh_toan)}
+                              </select>
+                            </div>
+                          </div>
+                        </div>
+                      </div>
+                    )}
+                  </div>
+                  {bankPurchasesRows.length > 0 && (
+                    <label className="w-full text-center bg-white hover:bg-[#f0f0ed] text-black text-[9px] font-black uppercase tracking-wider py-1 border border-dashed border-[#141414] transition cursor-pointer">
+                      Thay đổi tệp mua vào
+                      <input type="file" accept=".xlsx,.xls,.csv" className="hidden" onChange={(e) => handleGenericFileUpload(e, "bank_purchases")} />
+                    </label>
+                  )}
+                </div>
+
+              </div>
+
+              {/* Advanced Matching Parameter Settings Panel */}
+              <div className="bg-white border-2 border-[#141414] p-5 shadow-[4px_4px_0px_#141414] space-y-3.5">
+                <div className="border-b-2 border-[#141414] pb-2 flex justify-between items-center">
+                  <h4 className="text-xs font-black uppercase text-black tracking-wider">⚙️ THAM SỐ THUẬT TOÁN ĐỐI CHIẾU HÓA ĐƠN & SỐ TIỀN</h4>
+                  <span className="text-[9px] text-slate-500 font-bold uppercase">Ưu tiên: MST &gt; Tài khoản &gt; Tên tương quan &gt; Gom nhóm hóa đơn</span>
+                </div>
+                <div className="grid grid-cols-2 sm:grid-cols-5 gap-4 text-xs">
+                  <div>
+                    <label className="text-[10px] uppercase font-black text-slate-500">Lệch ngày trước HĐ</label>
+                    <div className="flex items-center mt-1 border-2 border-[#141414] bg-white p-1">
+                      <input
+                        type="number"
+                        min="0"
+                        max="180"
+                        value={config.daysBeforeInvoice || 7}
+                        onChange={(e) => setConfig({ ...config, daysBeforeInvoice: parseInt(e.target.value) || 0 })}
+                        className="w-full focus:outline-none font-mono font-black text-black text-[11px]"
+                      />
+                      <span className="text-slate-400 font-bold ml-1 text-[10px]">Ngày</span>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase font-black text-slate-500">Lệch ngày sau HĐ</label>
+                    <div className="flex items-center mt-1 border-2 border-[#141414] bg-white p-1">
+                      <input
+                        type="number"
+                        min="0"
+                        max="180"
+                        value={config.daysAfterInvoice || 30}
+                        onChange={(e) => setConfig({ ...config, daysAfterInvoice: parseInt(e.target.value) || 0 })}
+                        className="w-full focus:outline-none font-mono font-black text-black text-[11px]"
+                      />
+                      <span className="text-slate-400 font-bold ml-1 text-[10px]">Ngày</span>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase font-black text-slate-500">Chênh lệch tuyệt đối</label>
+                    <div className="flex items-center mt-1 border-2 border-[#141414] bg-white p-1">
+                      <input
+                        type="number"
+                        min="0"
+                        step="1000"
+                        value={config.diffAbsThreshold || 10000}
+                        onChange={(e) => setConfig({ ...config, diffAbsThreshold: parseFloat(e.target.value) || 0 })}
+                        className="w-full focus:outline-none font-mono font-black text-black text-[11px]"
+                      />
+                      <span className="text-slate-400 font-bold ml-1 text-[9px]">đ</span>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase font-black text-slate-500">Sai số tỷ lệ</label>
+                    <div className="flex items-center mt-1 border-2 border-[#141414] bg-white p-1">
+                      <input
+                        type="number"
+                        min="0"
+                        step="0.05"
+                        max="10"
+                        value={config.diffPctThreshold || 0.5}
+                        onChange={(e) => setConfig({ ...config, diffPctThreshold: parseFloat(e.target.value) || 0 })}
+                        className="w-full focus:outline-none font-mono font-black text-black text-[11px]"
+                      />
+                      <span className="text-slate-400 font-bold ml-1 text-[10px]">%</span>
+                    </div>
+                  </div>
+                  <div>
+                    <label className="text-[10px] uppercase font-black text-slate-500">Hóa đơn ghép tối đa</label>
+                    <div className="flex items-center mt-1 border-2 border-[#141414] bg-white p-1">
+                      <input
+                        type="number"
+                        min="1"
+                        max="10"
+                        value={config.maxCombinationCount || 5}
+                        onChange={(e) => setConfig({ ...config, maxCombinationCount: parseInt(e.target.value) || 5 })}
+                        className="w-full focus:outline-none font-mono font-black text-black text-[11px]"
+                      />
+                      <span className="text-slate-400 font-bold ml-1 text-[10px]">Tấm</span>
+                    </div>
+                  </div>
+                </div>
+
+                <div className="pt-2">
+                  <button
+                    onClick={handleProcessBank}
+                    disabled={isProcessingBank}
+                    className="w-full bg-[#141414] text-white hover:bg-black hover:shadow-[6px_6px_0px_#00ff00] hover:translate-y-[-2px] text-xs font-black uppercase py-4 px-4 border-2 border-[#141414] shadow-[4px_4px_0px_#00ff00] transition flex items-center justify-center gap-2 cursor-pointer"
+                  >
+                    {isProcessingBank ? (
+                      <>
+                        <RefreshCw size={14} className="animate-spin text-white grow-0" />
+                        <span>Hệ thống đang đối soát công nợ & giải nhóm hóa đơn...</span>
+                      </>
+                    ) : (
+                      <>
+                        <Play size={14} className="text-[#00ff00]" />
+                        <span>Tiến hành đối chiếu sao kê và hóa đơn (Khớp đa chỉ tiêu)</span>
+                      </>
+                    )}
+                  </button>
+                </div>
               </div>
 
               {/* Output bank statement mapping */}
               {bankMappedRows.length > 0 && (
                 <div className="bg-white border-2 border-[#141414] shadow-[4px_4px_0px_#141414] overflow-hidden animate-fade-in">
-                  <div className="p-4 px-6 border-b-2 border-[#141414] bg-[#f0f0ed]">
-                    <h4 className="font-black text-xs uppercase text-black tracking-wider">Kết quả phân bổ nghiệp vụ ngân quỹ</h4>
-                    <p className="text-[10px] text-slate-500 font-bold uppercase mt-1">Các giao dịch dịch vụ phí, nộp ngân sách, chi lương được tách riêng khỏi công nợ mua bán</p>
+                  <div className="p-4 px-6 border-b-2 border-[#141414] bg-[#f0f0ed] flex flex-col sm:flex-row justify-between items-start sm:items-center gap-3">
+                    <div>
+                      <h4 className="font-black text-xs uppercase text-black tracking-wider">Kết quả đối chiếu tự động hóa đơn & ngân quỹ</h4>
+                      <p className="text-[10px] text-slate-500 font-bold uppercase mt-1">
+                        Sổ theo dõi thanh toán thông minh áp dụng nguyên lý khấu trừ công nợ dồn tích
+                      </p>
+                    </div>
+                    <div className="flex gap-2">
+                      <span className="bg-[#00ff00] text-black px-2 py-0.5 font-bold border border-black text-[9px] uppercase font-mono">
+                        Đã khớp: {bankMappedRows.filter(r => r.matchedInvoiceNo).length} GD
+                      </span>
+                      <span className="bg-yellow-300 text-black px-2 py-0.5 font-bold border border-black text-[9px] uppercase font-mono">
+                        Dòng kiểm tra: {bankMappedRows.filter(r => r.treatment === "Cần kiểm tra").length} GD
+                      </span>
+                    </div>
                   </div>
 
                   <div className="overflow-x-auto">
                     <table className="w-full text-left text-xs border-collapse">
                       <thead>
                         <tr className="bg-[#f0f0ed] border-b-2 border-[#141414] font-black uppercase text-black tracking-wider">
-                          <th className="p-3 pl-6">Nội dung giao dịch ngân hàng gốc</th>
+                          <th className="p-3 pl-6">Nội dung sao kê ngân quỹ gốc</th>
                           <th className="p-3">Thu (Có)</th>
                           <th className="p-3">Chi (Nợ)</th>
-                          <th className="p-3">Cột nghiệp vụ dự báo</th>
-                          <th className="p-3">Mã đối tác</th>
-                          <th className="p-3">Đối tác ngân hàng hợp lịch</th>
+                          <th className="p-3">Mã đối tượng</th>
+                          <th className="p-3">Tên đối tượng chuẩn hóa</th>
+                          <th className="p-3">Hóa đơn đối chuẩn</th>
+                          <th className="p-3">Lệch số tiền</th>
                           <th className="p-3 text-center">Độ khớp</th>
                           <th className="p-3 pr-6">Trạng thái</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#141414]/10">
                         {bankMappedRows.slice(0, bankLimit).map((row) => (
-                          <tr key={row.id} className="hover:bg-[#f0f0ed]/30 transition">
-                            <td className="p-3 pl-6 font-mono text-[11px] text-[#141414] max-w-xs">{row.desc}</td>
+                          <tr key={row.id} className="hover:bg-[#f0f0ed]/30 transition text-black">
+                            <td className="p-3 pl-6 font-mono text-[11px] text-[#141414] max-w-sm" title={row.desc}>
+                              <div>{row.desc}</div>
+                              {row.reason && (
+                                <div className="text-[9px] text-slate-500 font-sans mt-0.5 italic">
+                                  💡 {row.reason}
+                                </div>
+                              )}
+                            </td>
                             <td className="p-3 text-emerald-600 font-bold font-mono">
                               {row.amountIn > 0 ? `${row.amountIn.toLocaleString()}đ` : "-"}
                             </td>
                             <td className="p-3 text-red-600 font-bold font-mono">
                               {row.amountOut > 0 ? `${row.amountOut.toLocaleString()}đ` : "-"}
-                            </td>
-                            <td className="p-3">
-                              <span className="inline-block px-2 py-0.5 border border-black bg-[#f0f0ed] text-black font-black text-[10px] uppercase font-mono">
-                                {row.predictedGroup}
-                              </span>
                             </td>
                             <td className="p-3">
                               {editingBankRowId === row.id ? (
@@ -2347,7 +3796,41 @@ export default function App() {
                                 </div>
                               )}
                             </td>
-                            <td className="p-3 text-slate-600 max-w-xs truncate font-medium">{row.proposedName || "Nghi vấn / Thất lạc"}</td>
+                            <td className="p-3 text-slate-700 font-bold font-sans max-w-xs truncate">
+                              {row.proposedName || "Nghi vấn / Thất lạc"}
+                            </td>
+                            <td className="p-3">
+                              {row.matchedInvoiceNo ? (
+                                <div className="space-y-0.5">
+                                  <div className="font-bold text-slate-900 bg-amber-100 border border-amber-300 px-1 py-0.5 text-[9px] rounded-sm w-fit truncate max-w-[150px]">
+                                    🎫 HĐ: {row.matchedInvoiceNo}
+                                  </div>
+                                  {row.matchedInvoiceDate && (
+                                    <div className="text-[9px] text-slate-500 font-mono">
+                                      📅 {row.matchedInvoiceDate}
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-slate-400 font-normal">-</span>
+                              )}
+                            </td>
+                            <td className="p-3">
+                              {row.differenceAmount !== undefined && row.differenceAmount !== 0 ? (
+                                <div className="font-bold font-mono text-[10px]">
+                                  <span className={row.differenceAmount > 0 ? "text-red-600" : "text-emerald-600"}>
+                                    {row.differenceAmount > 0 ? "Thừa " : "Thiếu "}{Math.abs(row.differenceAmount).toLocaleString()}đ
+                                  </span>
+                                  {row.differencePercentage !== undefined && row.differencePercentage > 0 && (
+                                    <div className="text-[8px] text-slate-400 font-normal">
+                                      ({row.differencePercentage.toFixed(1)}%)
+                                    </div>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-slate-400">-</span>
+                              )}
+                            </td>
                             <td className="p-3 text-center">
                               <span className={`inline-block px-1.5 py-0.5 border border-black font-black font-mono text-[10px] ${
                                 row.score >= config.autoThreshold ? "bg-[#00ff00] text-black" : "bg-yellow-300 text-black"
@@ -2356,7 +3839,7 @@ export default function App() {
                               </span>
                             </td>
                             <td className="p-3 pr-6">
-                              <span className={`inline-block px-2 py-0.5 border border-black text-[10px] font-black ${
+                              <span className={`inline-block px-2 py-0.5 border border-black text-[10px] font-black uppercase ${
                                 row.treatment === "Đã chốt" ? "bg-[#00ff00] text-black" : "bg-yellow-300 text-black"
                               }`}>
                                 {row.treatment}
@@ -2379,18 +3862,22 @@ export default function App() {
                     </div>
                   )}
 
-                  <div className="p-4 bg-[#f0f0ed] border-t-2 border-[#141414] text-right">
+                  <div className="p-4 bg-[#f0f0ed] border-t-2 border-[#141414] text-right flex justify-between items-center px-6">
+                    <span className="text-[10px] font-black text-black uppercase tracking-wider">
+                      Được thiết kế theo tiêu chuẩn Kiểm toán số 2026
+                    </span>
                     <button
                       onClick={exportBankToExcel}
                       className="bg-[#00ff00] hover:bg-[#05e005] hover:shadow-[3px_3px_0px_#141414] hover:translate-y-[-1px] text-black font-black uppercase tracking-wider text-xs p-3.5 py-1.5 border-2 border-[#141414] inline-flex items-center gap-1.5 shadow-[2px_2px_0px_#141414] transition cursor-pointer"
                     >
                       <Download size={13} />
-                      Export Excel
+                      Export Excel (7 Sheets)
                     </button>
                   </div>
                 </div>
               )}
             </div>
+            </ErrorBoundary>
           )}
 
           {/* --- TAB CONTENT 5: INTEGRATED RECONCILIATION --- */}
@@ -2606,5 +4093,6 @@ unidecode>=1.3.8`}
         </div>
       )}
     </div>
+    </ErrorBoundary>
   );
 }
