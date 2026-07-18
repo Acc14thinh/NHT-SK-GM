@@ -1209,8 +1209,8 @@ export default function App() {
       const existingCodes = tempCommodities.map(c => c.ma_hang_hoa);
 
       const results = commoditySourceRows.map((row, index) => {
-        const desc = row[commodityMappings.ten_hang_hoa] || "";
-        const uom = row[commodityMappings.don_vi_tinh] || "";
+        const desc = String(row[commodityMappings.ten_hang_hoa] !== undefined && row[commodityMappings.ten_hang_hoa] !== null ? row[commodityMappings.ten_hang_hoa] : "");
+        const uom = String(row[commodityMappings.don_vi_tinh] !== undefined && row[commodityMappings.don_vi_tinh] !== null ? row[commodityMappings.don_vi_tinh] : "");
 
         const match = matchCommodityRow(desc, uom, tempCommodities, config.autoThreshold, config.autoThreshold);
 
@@ -1282,10 +1282,10 @@ export default function App() {
       const isBuyer = partnerMode === "Bán ra";
 
       const results = partnerSourceRows.map((row, index) => {
-        const nameVal = row[partnerMappings.ten_doi_tuong] || "";
-        const mstVal = row[partnerMappings.ma_so_thue] || "";
-        const accVal = row[partnerMappings.so_tai_khoan] || "";
-        const invDesc = row[partnerMappings.ten_hang_hoa] || "";
+        const nameVal = String(row[partnerMappings.ten_doi_tuong] !== undefined && row[partnerMappings.ten_doi_tuong] !== null ? row[partnerMappings.ten_doi_tuong] : "");
+        const mstVal = String(row[partnerMappings.ma_so_thue] !== undefined && row[partnerMappings.ma_so_thue] !== null ? row[partnerMappings.ma_so_thue] : "");
+        const accVal = String(row[partnerMappings.so_tai_khoan] !== undefined && row[partnerMappings.so_tai_khoan] !== null ? row[partnerMappings.so_tai_khoan] : "");
+        const invDesc = String(row[partnerMappings.ten_hang_hoa] !== undefined && row[partnerMappings.ten_hang_hoa] !== null ? row[partnerMappings.ten_hang_hoa] : "");
 
         const match = matchPartnerRow(nameVal, mstVal, accVal, invDesc, tempPartners, isBuyer, config.autoThreshold, config.autoThreshold);
 

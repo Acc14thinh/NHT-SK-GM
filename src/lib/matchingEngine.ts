@@ -41,36 +41,42 @@ const commodityNormCache = new WeakMap<Commodity, CachedCommodityNorm>();
 const partnerNormCache = new WeakMap<Partner, CachedPartnerNorm>();
 
 // Removes Vietnamese accents / diacritics
-export function removeVietnameseAccents(str: string): string {
-  if (!str) return "";
-  return str
+export function removeVietnameseAccents(str: any): string {
+  if (str === null || str === undefined) return "";
+  const safeStr = typeof str === "string" ? str : String(str);
+  if (!safeStr) return "";
+  return safeStr
     .normalize("NFD")
     .replace(/[\u0300-\u036f]/g, "")
     .replace(/đ/g, "d")
     .replace(/Đ/g, "D");
 }
 
-export function normalizeText(text: string): string {
-  if (!text) return "";
-  const cached = normTextCache.get(text);
+export function normalizeText(text: any): string {
+  if (text === null || text === undefined) return "";
+  const safeText = typeof text === "string" ? text : String(text);
+  if (!safeText) return "";
+  const cached = normTextCache.get(safeText);
   if (cached !== undefined) return cached;
 
-  let norm = removeVietnameseAccents(text).toLowerCase();
+  let norm = removeVietnameseAccents(safeText).toLowerCase();
   // Keep only alphanumeric characters, spaces, and specs helpers . - x /
   norm = norm.replace(/[^a-z0-9\s\.\-x/]/g, " ");
   // Remove multiple spaces
   norm = norm.replace(/\s+/g, " ").trim();
 
-  normTextCache.set(text, norm);
+  normTextCache.set(safeText, norm);
   return norm;
 }
 
-export function normalizePartnerName(name: string): string {
-  if (!name) return "";
-  const cached = normPartnerCache.get(name);
+export function normalizePartnerName(name: any): string {
+  if (name === null || name === undefined) return "";
+  const safeName = typeof name === "string" ? name : String(name);
+  if (!safeName) return "";
+  const cached = normPartnerCache.get(safeName);
   if (cached !== undefined) return cached;
 
-  let text = normalizeText(name);
+  let text = normalizeText(safeName);
 
   const redundantWords = [
     /\bcong ty tnhh mtv\b/g,
@@ -200,19 +206,20 @@ export function getFuzzyRatio(s1: string, s2: string): number {
 }
 
 export function matchCommodityRow(
-  rowDesc: string,
-  rowUom: string,
+  rowDesc: any,
+  rowUom: any,
   commodities: Commodity[],
   autoThreshold: number = 85,
   checkThreshold: number = 70
 ): { code: string; name: string; score: number; reason: string } {
-  if (!rowDesc || !rowDesc.trim()) {
+  const safeDesc = typeof rowDesc === "string" ? rowDesc : String(rowDesc || "");
+  if (!safeDesc.trim()) {
     return { code: "", name: "", score: 0, reason: "Không có mô tả tên hàng" };
   }
 
   checkAndClearCaches();
 
-  const descNorm = normalizeText(rowDesc);
+  const descNorm = normalizeText(safeDesc);
 
   let bestScore = 0;
   let bestMatch: Commodity | null = null;
