@@ -10,6 +10,9 @@ export interface Commodity {
   quy_cach: string;
   tu_khoa_nhan_dien: string;
   ghi_chu: string;
+  don_gia_tham_chieu?: number;
+  don_gia_mua_gan_nhat?: number;
+  don_gia_ban_gan_nhat?: number;
 }
 
 export interface Partner {
@@ -35,6 +38,28 @@ export interface MatchingConfig {
   diffAbsThreshold?: number;  // default 10000
   diffPctThreshold?: number;  // default 0.5
   maxCombinationCount?: number; // default 5
+
+  // Cấu hình bổ sung tiêu chí Đơn giá hàng hóa
+  enablePriceMatching?: boolean;
+  allowDerivedPrice?: boolean;
+  priceRefSource?: "median" | "latest" | "master";
+  priceDiffThresholdVeryHigh?: number; // e.g., 2% -> 20 pts
+  priceDiffThresholdHigh?: number;     // e.g., 5% -> 15 pts
+  priceDiffThresholdMedium?: number;   // e.g., 10% -> 10 pts
+  priceDiffThresholdLow?: number;      // e.g., 20% -> 5 pts
+  allowUomConversion?: boolean;
+}
+
+export interface CommodityCandidate {
+  commodity: Commodity;
+  totalScore: number;
+  scoreName: number;
+  scoreSpecs: number;
+  scoreUom: number;
+  scorePrice: number;
+  scoreCategory: number;
+  priceDiffPct?: number | null;
+  refPrice?: number | null;
 }
 
 export interface MappedRow {
@@ -51,6 +76,23 @@ export interface MappedRow {
   treatment: "TỰ ĐỘNG GẮN" | "DUYỆT THỦ CÔNG" | "TẠO MÃ MỚI" | "BỎ QUA";
   notes: string;
   rawRowData: { [key: string]: any }; // Holds copy of all standard uploaded columns
+
+  // Bổ sung các chỉ số rà soát đơn giá & Top ứng viên
+  rawPrice?: number | null;
+  normalizedPrice?: number | null;
+  priceSource?: "Cột đơn giá gốc" | "Suy ra" | "Không có";
+  refPrice?: number | null;
+  refPriceType?: "Trung vị" | "Mua mới nhất" | "Bán mới nhất" | "Chung";
+  priceDiffAmt?: number | null;
+  priceDiffPct?: number | null;
+  scoreName?: number;
+  scoreSpecs?: number;
+  scoreUom?: number;
+  scorePrice?: number;
+  scoreCategory?: number;
+  priceWarning?: string | null;
+  top3Candidates?: CommodityCandidate[];
+  processingStatus?: string;
 }
 
 export interface BankAnalysisResult {

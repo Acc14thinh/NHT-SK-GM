@@ -26,7 +26,8 @@ import {
   TrendingUp,
   Coins,
   History,
-  FileCheck
+  FileCheck,
+  Eye
 } from "lucide-react";
 
 import { Commodity, Partner, MatchingConfig, MappedRow, BankAnalysisResult, ColumnMapping } from "./types";
@@ -95,16 +96,19 @@ export default function App() {
   const [activeRowsCount, setActiveRowsCount] = useState<number>(0);
 
   // --- MODE 1: Gắn mã hàng hóa ---
+  const [commodityLedgerType, setCommodityLedgerType] = useState<"Mua vào" | "Bán ra">("Mua vào");
   const [commoditySourceRows, setCommoditySourceRows] = useState<any[]>([]);
   const [commodityMappings, setCommodityMappings] = useState<ColumnMapping>({
     ten_hang_hoa: "ten_hang_hoa_dich_vu",
     don_vi_tinh: "don_vi_tinh",
     so_luong: "so_luong",
     don_gia: "don_gia",
-    thanh_tien: "thanh_tien"
+    thanh_tien: "thanh_tien",
+    thanh_tien_chua_thue: "thanh_tien"
   });
   const [commodityMappedRows, setCommodityMappedRows] = useState<MappedRow[]>([]);
   const [isProcessingCommodities, setIsProcessingCommodities] = useState(false);
+  const [selectedCommodityDetailRow, setSelectedCommodityDetailRow] = useState<MappedRow | null>(null);
 
   // --- MODE 2: Gắn mã đối tác ---
   const [partnerMode, setPartnerMode] = useState<"Mua vào" | "Bán ra">("Mua vào");
@@ -2015,6 +2019,9 @@ export default function App() {
       "Nhóm hàng": item.nhom_hang,
       "Đơn vị tính": item.don_vi_tinh,
       "Quy cách kỹ thuật": item.quy_cach,
+      "Đơn giá tham chiếu (đ)": item.don_gia_tham_chieu || "",
+      "Đơn giá mua gần nhất (đ)": item.don_gia_mua_gan_nhat || "",
+      "Đơn giá bán gần nhất (đ)": item.don_gia_ban_gan_nhat || "",
       "Ghi chú tự sinh": item.ghi_chu
     }));
     const wsCom = XLSX.utils.json_to_sheet(commoditiesData);
@@ -2127,6 +2134,9 @@ export default function App() {
         "Nhóm hàng": item.nhom_hang,
         "Đơn vị tính": item.don_vi_tinh,
         "Quy cách kỹ thuật": item.quy_cach,
+        "Đơn giá tham chiếu (đ)": item.don_gia_tham_chieu || "",
+        "Đơn giá mua gần nhất (đ)": item.don_gia_mua_gan_nhat || "",
+        "Đơn giá bán gần nhất (đ)": item.don_gia_ban_gan_nhat || "",
         "Ghi chú tự sinh": item.ghi_chu
       }));
       zip.file("5_Danh_muc_hang_hoa_cap_nhat.xlsx", getXlsxBuffer(commoditiesData, "Danh_muc_hang_hoa"));
@@ -2448,6 +2458,96 @@ export default function App() {
 
             <hr className="border-t-2 border-[#141414]" />
 
+            {/* Cấu hình tiêu chí Đơn giá hàng hóa */}
+            <div className="space-y-3 bg-[#fdfdfb] p-3 border-2 border-[#141414]">
+              <div className="flex justify-between items-center">
+                <h3 className="text-xs font-black text-black uppercase tracking-wider flex items-center gap-1.5">
+                  <span>💰</span> Đối chiếu Đơn giá hàng hóa
+                </h3>
+                <label className="inline-flex items-center cursor-pointer gap-1.5">
+                  <input
+                    type="checkbox"
+                    checked={config.enablePriceMatching !== false}
+                    onChange={(e) => setConfig({ ...config, enablePriceMatching: e.target.checked })}
+                    className="w-4 h-4 border-2 border-[#141414] accent-[#00ff00]"
+                  />
+                  <span className="text-[10px] font-black uppercase text-black">Kích hoạt</span>
+                </label>
+              </div>
+
+              {config.enablePriceMatching !== false && (
+                <div className="space-y-2.5 text-xs pt-1 border-t border-[#141414]/20">
+                  <div className="flex items-center justify-between gap-2">
+                    <label className="text-[10px] uppercase font-black text-[#555]">Cho phép đơn giá suy ra (Thành tiền / SL)</label>
+                    <input
+                      type="checkbox"
+                      checked={config.allowDerivedPrice !== false}
+                      onChange={(e) => setConfig({ ...config, allowDerivedPrice: e.target.checked })}
+                      className="w-4 h-4 border-2 border-[#141414] accent-[#00ff00]"
+                    />
+                  </div>
+
+                  <div>
+                    <label className="text-[10px] uppercase font-black text-[#555] block mb-1">Nguồn giá tham chiếu</label>
+                    <select
+                      value={config.priceRefSource || "median"}
+                      onChange={(e) => setConfig({ ...config, priceRefSource: e.target.value as any })}
+                      className="w-full border-2 border-[#141414] bg-white p-1 text-[11px] font-bold text-black focus:outline-none"
+                    >
+                      <option value="median">Đơn giá trung vị lịch sử / Danh mục</option>
+                      <option value="latest">Đơn giá mua/bán gần nhất</option>
+                      <option value="master">Đơn giá tham chiếu cố định danh mục</option>
+                    </select>
+                  </div>
+
+                  <div className="grid grid-cols-2 gap-2 text-[10px]">
+                    <div>
+                      <label className="uppercase font-black text-[#555]">Lệch rất thấp (&le; %)</label>
+                      <input
+                        type="number"
+                        value={config.priceDiffThresholdVeryHigh ?? 2}
+                        onChange={(e) => setConfig({ ...config, priceDiffThresholdVeryHigh: parseFloat(e.target.value) || 0 })}
+                        className="w-full border-2 border-[#141414] bg-white p-1 font-mono text-xs font-bold text-black"
+                      />
+                      <span className="text-[9px] text-green-700 font-bold">+20 điểm</span>
+                    </div>
+                    <div>
+                      <label className="uppercase font-black text-[#555]">Lệch thấp (&le; %)</label>
+                      <input
+                        type="number"
+                        value={config.priceDiffThresholdHigh ?? 5}
+                        onChange={(e) => setConfig({ ...config, priceDiffThresholdHigh: parseFloat(e.target.value) || 0 })}
+                        className="w-full border-2 border-[#141414] bg-white p-1 font-mono text-xs font-bold text-black"
+                      />
+                      <span className="text-[9px] text-emerald-700 font-bold">+15 điểm</span>
+                    </div>
+                    <div>
+                      <label className="uppercase font-black text-[#555]">Lệch vừa (&le; %)</label>
+                      <input
+                        type="number"
+                        value={config.priceDiffThresholdMedium ?? 10}
+                        onChange={(e) => setConfig({ ...config, priceDiffThresholdMedium: parseFloat(e.target.value) || 0 })}
+                        className="w-full border-2 border-[#141414] bg-white p-1 font-mono text-xs font-bold text-black"
+                      />
+                      <span className="text-[9px] text-amber-700 font-bold">+10 điểm</span>
+                    </div>
+                    <div>
+                      <label className="uppercase font-black text-[#555]">Lệch cao (&le; %)</label>
+                      <input
+                        type="number"
+                        value={config.priceDiffThresholdLow ?? 20}
+                        onChange={(e) => setConfig({ ...config, priceDiffThresholdLow: parseFloat(e.target.value) || 0 })}
+                        className="w-full border-2 border-[#141414] bg-white p-1 font-mono text-xs font-bold text-black"
+                      />
+                      <span className="text-[9px] text-orange-700 font-bold">+5 điểm</span>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            <hr className="border-t-2 border-[#141414]" />
+
             {/* Code prefixes */}
             <div className="space-y-3">
               <h3 className="text-xs font-black text-black uppercase tracking-wider">Quy tắc tiền tố sinh mã</h3>
@@ -2763,7 +2863,25 @@ export default function App() {
                     {/* Column mapping configuration */}
                     <div className="bg-[#f0f0ed] p-4.5 border-2 border-[#141414] space-y-3">
                       <div className="flex justify-between items-center flex-wrap gap-2 mb-1">
-                        <h4 className="text-xs font-black uppercase text-black tracking-wider">Khớp cột excel gốc của bạn:</h4>
+                        <div className="flex items-center gap-3">
+                          <h4 className="text-xs font-black uppercase text-black tracking-wider">Khớp cột excel gốc của bạn:</h4>
+                          <div className="flex items-center gap-2 bg-white px-2 py-1 border-2 border-[#141414]">
+                            <span className="text-[10px] font-black uppercase text-slate-500">Loại sổ:</span>
+                            <button
+                              onClick={() => setCommodityLedgerType("Mua vào")}
+                              className={`px-2 py-0.5 text-[10px] font-black uppercase transition ${commodityLedgerType === "Mua vào" ? "bg-[#141414] text-white" : "text-black hover:bg-slate-100"}`}
+                            >
+                              Mua vào
+                            </button>
+                            <button
+                              onClick={() => setCommodityLedgerType("Bán ra")}
+                              className={`px-2 py-0.5 text-[10px] font-black uppercase transition ${commodityLedgerType === "Bán ra" ? "bg-[#141414] text-white" : "text-black hover:bg-slate-100"}`}
+                            >
+                              Bán ra
+                            </button>
+                          </div>
+                        </div>
+
                         <label className="bg-yellow-300 hover:bg-yellow-400 text-black text-[10px] font-black uppercase tracking-wider px-2.5 py-1 border border-black shadow-[2px_2px_0px_#141414] hover:translate-y-[-1px] active:translate-y-0 transition cursor-pointer inline-flex items-center gap-1">
                           <FileSpreadsheet size={12} />
                           Thay đổi tệp
@@ -2775,7 +2893,8 @@ export default function App() {
                           />
                         </label>
                       </div>
-                      <div className="grid grid-cols-2 sm:grid-cols-5 gap-3 text-xs">
+
+                      <div className="grid grid-cols-2 sm:grid-cols-6 gap-3 text-xs">
                         <div>
                           <label className="text-[10px] uppercase font-black text-slate-500">Diễn giải hàng hóa *</label>
                           <select
@@ -2810,7 +2929,7 @@ export default function App() {
                         </div>
 
                         <div>
-                          <label className="text-[10px] uppercase font-black text-slate-500">Đơn giá</label>
+                          <label className="text-[10px] uppercase font-black text-slate-500">Đơn giá HĐ</label>
                           <select
                             value={commodityMappings.don_gia}
                             onChange={(e) => setCommodityMappings({ ...commodityMappings, don_gia: e.target.value })}
@@ -2821,14 +2940,20 @@ export default function App() {
                         </div>
 
                         <div>
-                          <label className="text-[10px] uppercase font-black text-slate-500">Thành tiền</label>
+                          <label className="text-[10px] uppercase font-black text-slate-500">Thành tiền chưa thuế</label>
                           <select
-                            value={commodityMappings.thanh_tien}
-                            onChange={(e) => setCommodityMappings({ ...commodityMappings, thanh_tien: e.target.value })}
+                            value={commodityMappings.thanh_tien_chua_thue || commodityMappings.thanh_tien}
+                            onChange={(e) => setCommodityMappings({ ...commodityMappings, thanh_tien_chua_thue: e.target.value, thanh_tien: e.target.value })}
                             className="w-full mt-1 border-2 border-[#141414] bg-white p-1.5 focus:outline-none font-bold text-black text-[11px]"
                           >
-                            {getColumnOptions(commodityHeaders, commodityMappings.thanh_tien)}
+                            {getColumnOptions(commodityHeaders, commodityMappings.thanh_tien_chua_thue || commodityMappings.thanh_tien)}
                           </select>
+                        </div>
+
+                        <div className="col-span-2 sm:col-span-1 flex items-end">
+                          <span className="text-[10px] text-slate-500 font-medium leading-tight">
+                            ⚡ Đơn giá sẽ tự động suy ra nếu cột Đơn giá rỗng nhưng có Số lượng & Thành tiền.
+                          </span>
                         </div>
                       </div>
                     </div>
@@ -2846,7 +2971,7 @@ export default function App() {
                       ) : (
                         <>
                           <Play size={14} className="text-[#00ff00]" />
-                          <span>Bắt đầu rà soát và gắn mã hàng hóa</span>
+                          <span>Bắt đầu rà soát &amp; đối chiếu đơn giá hàng hóa</span>
                         </>
                       )}
                     </button>
@@ -2859,11 +2984,11 @@ export default function App() {
                 <div className="bg-white border-2 border-[#141414] shadow-[4px_4px_0px_#141414] overflow-hidden">
                   <div className="p-4 px-6 border-b-2 border-[#141414] bg-[#f0f0ed] flex justify-between items-center flex-wrap gap-2">
                     <div>
-                      <h4 className="font-black text-xs uppercase text-black tracking-wider">Kết quả gán mã hàng hóa chi tiết</h4>
-                      <p className="text-[10px] text-slate-500 font-bold uppercase mt-1">Sửa trực tiếp Mã đề xuất qua hộp chọn dưới</p>
+                      <h4 className="font-black text-xs uppercase text-black tracking-wider">Kết quả rà soát &amp; gắn mã hàng hóa chi tiết</h4>
+                      <p className="text-[10px] text-slate-500 font-bold uppercase mt-1">Bao gồm phân tích chênh lệch đơn giá &amp; danh sách Top 3 ứng viên</p>
                     </div>
 
-                    <div className="flex gap-2 text-xs">
+                    <div className="flex gap-2 text-xs flex-wrap">
                       <span className="bg-[#00ff00] text-black px-2.5 py-1 font-bold border border-black flex items-center gap-1.5 text-[10px] uppercase font-mono">
                         <Check size={12} />
                         Khớp gắn mã cũ (≥ {config.autoThreshold}%): {commodityMappedRows.filter(r => r.treatment === "TỰ ĐỘNG GẮN").length} dòng
@@ -2878,21 +3003,43 @@ export default function App() {
                   <div className="overflow-x-auto">
                     <table className="w-full text-left text-xs border-collapse">
                       <thead>
-                        <tr className="bg-[#f0f0ed] border-b-2 border-[#141414] font-black uppercase text-black tracking-wider">
+                        <tr className="bg-[#f0f0ed] border-b-2 border-[#141414] font-black uppercase text-black tracking-wider text-[11px]">
                           <th className="p-3 pl-6">Nội dung diễn giải gốc</th>
                           <th className="p-3">ĐVT</th>
-                          <th className="p-3">Mã hàng hóa đề xuất</th>
-                          <th className="p-3">Tên sản phẩm chuẩn</th>
-                          <th className="p-3 text-center">Độ khớp</th>
-                          <th className="p-3">Nguyên tắc quyết định</th>
+                          <th className="p-3">Đơn giá HĐ (Nguồn)</th>
+                          <th className="p-3">Mã hàng đề xuất</th>
+                          <th className="p-3">Giá tham chiếu</th>
+                          <th className="p-3">Chênh lệch giá</th>
+                          <th className="p-3 text-center">Tổng điểm</th>
+                          <th className="p-3">Điểm thành phần</th>
+                          <th className="p-3">Ứng viên</th>
                           <th className="p-3 pr-6">Trạng thái</th>
                         </tr>
                       </thead>
                       <tbody className="divide-y divide-[#141414]/10">
                         {commodityMappedRows.slice(0, commodityLimit).map((row) => (
                           <tr key={row.id} className="hover:bg-[#f0f0ed]/30 transition">
-                            <td className="p-3 pl-6 max-w-xs truncate font-bold text-black">{row.originalText}</td>
+                            <td className="p-3 pl-6 max-w-xs truncate font-bold text-black">
+                              <div>{row.originalText}</div>
+                              {row.priceWarning && (
+                                <div className="text-[10px] font-bold text-red-600 bg-red-50 border border-red-200 px-1 py-0.5 mt-0.5 w-fit">
+                                  ⚠️ {row.priceWarning}
+                                </div>
+                              )}
+                            </td>
                             <td className="p-3 text-slate-500 font-mono font-medium">{row.originalUom || "Cái"}</td>
+                            <td className="p-3 font-mono font-bold text-black">
+                              {row.normalizedPrice !== null && row.normalizedPrice !== undefined ? (
+                                <div>
+                                  <span>{row.normalizedPrice.toLocaleString("vi-VN")}đ</span>
+                                  <span className={`block text-[9px] font-normal ${row.priceSource === "Suy ra" ? "text-amber-700 font-bold" : "text-slate-500"}`}>
+                                    ({row.priceSource})
+                                  </span>
+                                </div>
+                              ) : (
+                                <span className="text-slate-400 font-normal">--</span>
+                              )}
+                            </td>
                             <td className="p-3">
                               {editingCommodityId === row.id ? (
                                 <select
@@ -2912,17 +3059,47 @@ export default function App() {
                                   ))}
                                 </select>
                               ) : (
-                                <div
-                                  onClick={() => setEditingCommodityId(row.id)}
-                                  className="font-mono text-[11px] font-black text-[#141414] bg-white hover:bg-yellow-100 hover:border-[#141414] transition cursor-pointer px-2 py-1 border-2 border-dashed border-slate-300 flex items-center justify-between gap-1 w-fit min-w-[100px]"
-                                  title="Nhấp để thay đổi mã hàng"
-                                >
-                                  <span>{row.proposedCode}</span>
-                                  <span className="text-[10px] text-slate-400">✏️</span>
+                                <div>
+                                  <div
+                                    onClick={() => setEditingCommodityId(row.id)}
+                                    className="font-mono text-[11px] font-black text-[#141414] bg-white hover:bg-yellow-100 hover:border-[#141414] transition cursor-pointer px-2 py-1 border-2 border-dashed border-slate-300 flex items-center justify-between gap-1 w-fit min-w-[100px]"
+                                    title="Nhấp để thay đổi mã hàng"
+                                  >
+                                    <span>{row.proposedCode}</span>
+                                    <span className="text-[10px] text-slate-400">✏️</span>
+                                  </div>
+                                  <div className="text-[10px] text-slate-600 font-medium truncate max-w-[120px] mt-0.5">
+                                    {row.proposedName}
+                                  </div>
                                 </div>
                               )}
                             </td>
-                            <td className="p-3 text-[#1a1a1a] font-medium">{row.proposedName}</td>
+                            <td className="p-3 font-mono text-[11px]">
+                              {row.refPrice !== null && row.refPrice !== undefined ? (
+                                <div>
+                                  <span className="font-bold text-slate-800">{row.refPrice.toLocaleString("vi-VN")}đ</span>
+                                  <span className="block text-[9px] text-slate-500">({row.refPriceType || "Lịch sử"})</span>
+                                </div>
+                              ) : (
+                                <span className="text-slate-400">Chưa có giá</span>
+                              )}
+                            </td>
+                            <td className="p-3 font-mono text-[11px]">
+                              {row.priceDiffPct !== null && row.priceDiffPct !== undefined ? (
+                                <div>
+                                  <span className={`font-bold ${row.priceDiffPct <= 5 ? "text-green-700" : row.priceDiffPct <= 10 ? "text-amber-700" : "text-red-700"}`}>
+                                    {row.priceDiffPct.toFixed(1)}%
+                                  </span>
+                                  {row.priceDiffAmt !== null && row.priceDiffAmt !== undefined && (
+                                    <span className="block text-[9px] text-slate-500">
+                                      ({row.priceDiffAmt.toLocaleString("vi-VN")}đ)
+                                    </span>
+                                  )}
+                                </div>
+                              ) : (
+                                <span className="text-slate-400">--</span>
+                              )}
+                            </td>
                             <td className="p-3 text-center">
                               <span className={`inline-block px-1.5 py-0.5 border border-black font-black font-mono text-[10px] ${
                                 row.score >= config.autoThreshold ? "bg-[#00ff00] text-black" : "bg-yellow-300 text-black"
@@ -2930,13 +3107,35 @@ export default function App() {
                                 {row.score}%
                               </span>
                             </td>
-                            <td className="p-3 text-[11px] text-slate-500 max-w-xs font-medium">{row.reason}</td>
+                            <td className="p-3 text-[10px] font-mono text-slate-600 space-y-0.5">
+                              <div>Tên: <span className="font-bold">{row.scoreName ?? 0}/45</span></div>
+                              <div>ĐVT: <span className="font-bold">{row.scoreUom ?? 0}/10</span> | Quy cách: <span className="font-bold">{row.scoreSpecs ?? 0}/20</span></div>
+                              <div>Giá: <span className="font-bold text-indigo-700">{row.scorePrice ?? 0}/20</span></div>
+                            </td>
+                            <td className="p-3">
+                              {row.top3Candidates && row.top3Candidates.length > 0 ? (
+                                <button
+                                  onClick={() => setSelectedCommodityDetailRow(row)}
+                                  className="bg-white hover:bg-yellow-200 text-black font-bold text-[10px] px-2 py-1 border border-black shadow-[1px_1px_0px_#141414] active:translate-y-0.5 transition cursor-pointer flex items-center gap-1"
+                                >
+                                  <span>Top {row.top3Candidates.length} gán</span>
+                                  <Eye size={10} />
+                                </button>
+                              ) : (
+                                <span className="text-slate-400 text-[10px]">--</span>
+                              )}
+                            </td>
                             <td className="p-3 pr-6">
                               <span className={`inline-block px-2 py-0.5 border border-black text-[10px] font-black ${
                                 row.treatment === "TỰ ĐỘNG GẮN" ? "bg-[#00ff00] text-black" : "bg-sky-100 text-[#141414] border-dashed"
                               }`}>
                                 {row.treatment}
                               </span>
+                              {row.processingStatus && (
+                                <div className="text-[9px] font-medium text-slate-500 mt-0.5">
+                                  {row.processingStatus}
+                                </div>
+                              )}
                             </td>
                           </tr>
                         ))}
@@ -4039,6 +4238,127 @@ unidecode>=1.3.8`}
           <p className="text-slate-500 font-bold uppercase text-[9px] mt-1.5">Sử dụng thuật toán so khớp khoảng cách mờ chuỗi ký tự tiếng Việt chuẩn hóa • Bảo mật cục bộ 100%</p>
         </div>
       </footer>
+
+      {/* --- TOP 3 COMMODITY CANDIDATES MODAL OVERLAY --- */}
+      {selectedCommodityDetailRow && (
+        <div className="fixed inset-0 bg-[#141414]/80 z-50 flex items-center justify-center p-4 overflow-y-auto">
+          <div className="bg-white border-4 border-[#141414] max-w-2xl w-full p-6 shadow-[8px_8px_0px_#141414] animate-fade-in space-y-4 my-8">
+            <div className="flex justify-between items-center pb-3 border-b-2 border-[#141414]">
+              <div className="flex items-center gap-2">
+                <span className="bg-[#00ff00] text-black font-black p-1 border border-black text-xs">TOP 3</span>
+                <h4 className="font-black text-xs uppercase tracking-wider text-black">
+                  So sánh danh sách Ứng viên Hàng hóa Top 3
+                </h4>
+              </div>
+              <button
+                onClick={() => setSelectedCommodityDetailRow(null)}
+                className="bg-red-400 hover:bg-red-500 text-black font-black text-xs px-2.5 py-1 border-2 border-black"
+              >
+                ✕ Đóng
+              </button>
+            </div>
+
+            {/* Original Row Summary */}
+            <div className="bg-[#f0f0ed] p-3 border-2 border-[#141414] text-xs space-y-1 font-mono">
+              <div><span className="font-black text-slate-500 uppercase">Diễn giải HĐ:</span> <span className="font-bold text-black">{selectedCommodityDetailRow.originalText}</span></div>
+              <div className="flex flex-wrap gap-4 text-[11px] pt-1 border-t border-slate-300">
+                <div><span className="text-slate-500">ĐVT HĐ:</span> <span className="font-bold text-black">{selectedCommodityDetailRow.originalUom || "Cái"}</span></div>
+                <div>
+                  <span className="text-slate-500">Đơn giá HĐ:</span>{" "}
+                  <span className="font-bold text-blue-700">
+                    {selectedCommodityDetailRow.normalizedPrice !== null && selectedCommodityDetailRow.normalizedPrice !== undefined
+                      ? `${selectedCommodityDetailRow.normalizedPrice.toLocaleString("vi-VN")}đ (${selectedCommodityDetailRow.priceSource})`
+                      : "Không có"}
+                  </span>
+                </div>
+                <div><span className="text-slate-500">Mã hiện tại:</span> <span className="font-bold text-black">{selectedCommodityDetailRow.proposedCode}</span></div>
+              </div>
+            </div>
+
+            {/* Candidate List */}
+            <div className="space-y-3">
+              <h5 className="text-[10px] font-black uppercase tracking-wider text-slate-500">
+                Top ứng viên có điểm tương đồng &amp; đơn giá sát nhất:
+              </h5>
+
+              {selectedCommodityDetailRow.top3Candidates && selectedCommodityDetailRow.top3Candidates.length > 0 ? (
+                selectedCommodityDetailRow.top3Candidates.map((cand, idx) => (
+                  <div
+                    key={cand.commodity.ma_hang_hoa}
+                    className={`p-3 border-2 border-[#141414] shadow-[3px_3px_0px_#141414] transition ${
+                      cand.commodity.ma_hang_hoa === selectedCommodityDetailRow.proposedCode
+                        ? "bg-green-50 border-green-800"
+                        : "bg-white hover:bg-slate-50"
+                    }`}
+                  >
+                    <div className="flex justify-between items-start flex-wrap gap-2">
+                      <div className="flex items-center gap-2">
+                        <span className={`px-2 py-0.5 border border-black font-black text-[10px] uppercase font-mono ${
+                          idx === 0 ? "bg-[#00ff00] text-black" : idx === 1 ? "bg-yellow-300 text-black" : "bg-slate-200 text-black"
+                        }`}>
+                          TOP {idx + 1}
+                        </span>
+                        <span className="font-mono font-black text-xs text-black">{cand.commodity.ma_hang_hoa}</span>
+                        <span className="font-bold text-xs text-slate-800">{cand.commodity.ten_hang_hoa_chuan}</span>
+                      </div>
+
+                      <div className="flex items-center gap-2">
+                        <span className="font-mono font-black text-xs bg-[#141414] text-[#00ff00] px-2 py-0.5 border border-black">
+                          {cand.totalScore}%
+                        </span>
+                        <button
+                          onClick={() => {
+                            handleEditCommodityCode(selectedCommodityDetailRow.id, cand.commodity.ma_hang_hoa);
+                            setSelectedCommodityDetailRow(null);
+                          }}
+                          className="bg-yellow-300 hover:bg-yellow-400 text-black font-black uppercase text-[10px] px-2.5 py-1 border border-black shadow-[1px_1px_0px_#141414] active:translate-y-0.5 transition cursor-pointer"
+                        >
+                          Chọn mã này
+                        </button>
+                      </div>
+                    </div>
+
+                    <div className="grid grid-cols-2 sm:grid-cols-4 gap-2 text-[10px] font-mono mt-2 pt-2 border-t border-slate-200 text-slate-600">
+                      <div><span className="text-slate-400">ĐVT danh mục:</span> <span className="font-bold text-black">{cand.commodity.don_vi_tinh || "Cái"}</span></div>
+                      <div>
+                        <span className="text-slate-400">Giá tham chiếu:</span>{" "}
+                        <span className="font-bold text-slate-900">
+                          {cand.refPrice !== null && cand.refPrice !== undefined ? `${cand.refPrice.toLocaleString("vi-VN")}đ` : "Chưa có"}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400">Chênh lệch giá:</span>{" "}
+                        <span className={`font-bold ${cand.priceDiffPct !== null && cand.priceDiffPct !== undefined && cand.priceDiffPct <= 5 ? "text-green-700" : "text-amber-700"}`}>
+                          {cand.priceDiffPct !== null && cand.priceDiffPct !== undefined ? `${cand.priceDiffPct.toFixed(1)}%` : "--"}
+                        </span>
+                      </div>
+                      <div>
+                        <span className="text-slate-400">Phân rã điểm:</span>{" "}
+                        <span className="font-bold text-indigo-700">
+                          Tên:{cand.scoreName}/45, ĐVT:{cand.scoreUom}/10, Quy cách:{cand.scoreSpecs}/20, Giá:{cand.scorePrice}/20
+                        </span>
+                      </div>
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <div className="text-xs text-slate-500 font-bold p-4 text-center border-2 border-dashed border-slate-300">
+                  Không tìm thấy ứng viên phù hợp trong danh mục.
+                </div>
+              )}
+            </div>
+
+            <div className="pt-2 text-right">
+              <button
+                onClick={() => setSelectedCommodityDetailRow(null)}
+                className="bg-[#141414] text-white hover:bg-black font-black uppercase text-xs px-5 py-2 border-2 border-[#141414] shadow-[2px_2px_0px_#00ff00]"
+              >
+                Hoàn tất xem
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* --- MASTER IMPORT DIALOG OVERLAY --- */}
       {importConfirm && (
