@@ -4,7 +4,7 @@
  * using O(1) Pre-Normalization Caches, 1D space Levenshtein DP, and Early Break Bounds.
  */
 
-import { Commodity, Partner, MappedRow, BankAnalysisResult, ColumnMapping } from "../types";
+import { Commodity, Partner, MappedRow, BankAnalysisResult, ColumnMapping, MatchingConfig, CommodityCandidate } from "../types";
 import { parseAmount } from "./excelParser";
 
 // Maximum size in memory for primitive key caches to avoid leaks
@@ -203,6 +203,376 @@ export function getFuzzyRatio(s1: string, s2: string): number {
   const ratio = Math.round((1 - distance / longLen) * 100);
   fuzzyRatioCache.set(cacheKey, ratio);
   return ratio;
+}
+
+export interface CommodityMatchWithPriceResult {
+  code: string;
+  name: string;
+  score: number;
+  reason: string;
+  rawPrice: number | null;
+  normalizedPrice: number | null;
+  priceSource: "Cột đơn giá gốc" | "Suy ra" | "Không có";
+  refPrice: number | null;
+  refPriceType: "Chung" | "Trung vị" | "Mua mới nhất" | "Bán mới nhất";
+  priceDiffAmt: number | null;
+  priceDiffPct: number | null;
+  priceMatchPct: number | null;
+  priceStatus: "KHỚP" | "KHÔNG KHỚP" | "Không áp dụng";
+  isPriceMatched: boolean | null;
+  scoreName: number;
+  scoreSpecs: number;
+  scoreUom: number;
+  scorePrice: number;
+  scoreCategory: number;
+  priceWarning: string | null;
+  top3Candidates: CommodityCandidate[];
+}
+
+/**
+ * Tính toán độ khớp đơn giá giữa Đơn giá bảng kê và Đơn giá tham chiếu
+ * Công thức:
+ * Tỷ lệ chênh lệch = (|Đơn giá bảng kê - Đơn giá tham chiếu| / Đơn giá tham chiếu) * 100
+ * Độ khớp đơn giá = 100 - Tỷ lệ chênh lệch (giới hạn 0% - 100%)
+ * Nếu Độ khớp >= Ngưỡng người dùng đặt -> KHỚP (+10 điểm)
+ * Ngược lại -> KHÔNG KHỚP (+0 điểm)
+ */
+export function calculatePriceMatch(
+  invoicePrice: number | null | undefined,
+  catalogPrice: number | null | undefined,
+  threshold: number = 90
+): {
+  diffAmt: number | null;
+  diffPct: number | null;
+  matchPct: number | null;
+  isMatched: boolean | null;
+  status: "KHỚP" | "KHÔNG KHỚP" | "Không áp dụng";
+  scorePrice: number;
+} {
+  if (
+    invoicePrice === null ||
+    invoicePrice === undefined ||
+    invoicePrice <= 0 ||
+    catalogPrice === null ||
+    catalogPrice === undefined ||
+    catalogPrice <= 0
+  ) {
+    return {
+      diffAmt: null,
+      diffPct: null,
+      matchPct: null,
+      isMatched: null,
+      status: "Không áp dụng",
+      scorePrice: 0
+    };
+  }
+
+  const diffAmt = Math.abs(invoicePrice - catalogPrice);
+  const diffPct = (diffAmt / catalogPrice) * 100;
+  // Độ khớp = 100 - Tỷ lệ chênh lệch, giới hạn 0% -> 100%
+  const rawMatch = 100 - diffPct;
+  const matchPct = Math.max(0, Math.min(100, Math.round(rawMatch * 10) / 10));
+
+  const isMatched = matchPct >= threshold;
+  return {
+    diffAmt,
+    diffPct: Math.round(diffPct * 10) / 10,
+    matchPct,
+    isMatched,
+    status: isMatched ? "KHỚP" : "KHÔNG KHỚP",
+    scorePrice: isMatched ? 10 : 0
+  };
+}
+
+export function matchCommodityRowWithPrice(
+  rowDesc: any,
+  rowUom: any,
+  rawPriceVal: any,
+  rawQtyVal: any,
+  rawAmtVal: any,
+  commodities: Commodity[],
+  config: MatchingConfig
+): CommodityMatchWithPriceResult {
+  let rawPrice: number | null = rawPriceVal !== undefined && rawPriceVal !== null ? parseAmount(rawPriceVal) : null;
+  if (rawPrice !== null && (isNaN(rawPrice) || rawPrice <= 0)) rawPrice = null;
+
+  let normalizedPrice: number | null = null;
+  let priceSource: "Cột đơn giá gốc" | "Suy ra" | "Không có" = "Không có";
+
+  if (rawPrice !== null && rawPrice > 0) {
+    normalizedPrice = rawPrice;
+    priceSource = "Cột đơn giá gốc";
+  } else if (config.allowDerivedPrice !== false) {
+    const qty = parseAmount(rawQtyVal);
+    const amt = parseAmount(rawAmtVal);
+    if (qty > 0 && amt > 0) {
+      normalizedPrice = Math.round(amt / qty);
+      priceSource = "Suy ra";
+    }
+  }
+
+  const safeDesc = typeof rowDesc === "string" ? rowDesc : String(rowDesc || "");
+  const safeUom = typeof rowUom === "string" ? rowUom : String(rowUom || "");
+
+  if (!safeDesc.trim()) {
+    return {
+      code: "",
+      name: "",
+      score: 0,
+      reason: "Không có mô tả tên hàng",
+      rawPrice,
+      normalizedPrice,
+      priceSource,
+      refPrice: null,
+      refPriceType: "Chung",
+      priceDiffAmt: null,
+      priceDiffPct: null,
+      priceMatchPct: null,
+      priceStatus: "Không áp dụng",
+      isPriceMatched: null,
+      scoreName: 0,
+      scoreSpecs: 0,
+      scoreUom: 0,
+      scorePrice: 0,
+      scoreCategory: 0,
+      priceWarning: "Thiếu mô tả tên hàng",
+      top3Candidates: []
+    };
+  }
+
+  checkAndClearCaches();
+  const descNorm = normalizeText(safeDesc);
+  const uomNorm = normalizeText(safeUom);
+  const priceThreshold = config.priceMatchThreshold ?? 90;
+
+  const candidateEvaluations: Array<{
+    candidate: CommodityCandidate;
+    diffAmt: number | null;
+    candidateWarning: string | null;
+  }> = [];
+
+  for (const item of commodities) {
+    let cached = commodityNormCache.get(item);
+    if (!cached) {
+      cached = {
+        nameNorm: normalizeText(item.ten_hang_hoa_chuan),
+        uomNorm: normalizeText(item.don_vi_tinh),
+        keywords: (item.tu_khoa_nhan_dien || "").split(",").map(k => normalizeText(k)).filter(Boolean),
+        specsNorm: normalizeText(item.quy_cach || "")
+      };
+      commodityNormCache.set(item, cached);
+    }
+
+    const { nameNorm: itemNameNorm, uomNorm: itemUomNorm, keywords, specsNorm } = cached;
+
+    // 1. Tên hàng hóa
+    let nameRatio = 0;
+    if (descNorm === itemNameNorm && descNorm !== "") {
+      nameRatio = 100;
+    } else {
+      nameRatio = getFuzzyRatio(descNorm, itemNameNorm);
+      if (keywords.length > 0) {
+        for (const kw of keywords) {
+          if (kw && descNorm.includes(kw)) {
+            nameRatio = Math.min(100, nameRatio + 6);
+          }
+        }
+      }
+    }
+
+    // 2. Đơn vị tính
+    let scoreUom = 0;
+    const hasBothUom = Boolean(uomNorm && itemUomNorm);
+    const isSameUom = hasBothUom && uomNorm === itemUomNorm;
+    const isDiffUom = hasBothUom && uomNorm !== itemUomNorm;
+
+    if (isSameUom) {
+      scoreUom = 10;
+    } else if (!hasBothUom) {
+      scoreUom = 5;
+    } else {
+      scoreUom = 0;
+    }
+
+    // 3. Quy cách
+    let scoreSpecs = 0;
+    if (specsNorm && descNorm.includes(specsNorm)) {
+      scoreSpecs = 15;
+    } else if (specsNorm) {
+      const specFuzzy = getFuzzyRatio(descNorm, specsNorm);
+      if (specFuzzy >= 70) scoreSpecs = 10;
+    }
+
+    // 4. Đơn giá (Tiêu chí phụ)
+    const catalogPrice = item.don_gia_tham_chieu || (item as any).don_gia || (item as any).gia_tham_chieu || 0;
+    let scorePrice = 0;
+    let candidateWarning: string | null = null;
+
+    const hasPriceComparison = config.enablePriceMatching !== false &&
+      normalizedPrice !== null && normalizedPrice > 0 &&
+      catalogPrice > 0;
+
+    let priceMatch = calculatePriceMatch(
+      hasPriceComparison ? normalizedPrice : null,
+      hasPriceComparison ? catalogPrice : null,
+      priceThreshold
+    );
+
+    if (hasPriceComparison) {
+      if (isDiffUom) {
+        // Ngoại lệ: ĐVT khác nhau -> không so sánh giá, không cộng/trừ điểm giá
+        scorePrice = 0;
+        priceMatch = {
+          diffAmt: null,
+          diffPct: null,
+          matchPct: null,
+          isMatched: null,
+          status: "Không áp dụng",
+          scorePrice: 0
+        };
+        candidateWarning = "ĐVT khác nhau (bỏ qua so sánh giá)";
+      } else {
+        // Nguyên tắc: Đơn giá chỉ là tiêu chí phụ. Không được gắn mã chỉ vì đơn giá khớp.
+        // Chỉ cộng điểm khi tên hàng đạt ngưỡng tối thiểu (>= 50%).
+        if (nameRatio >= 50) {
+          scorePrice = priceMatch.scorePrice; // +10 điểm nếu KHỚP, +0 điểm nếu KHÔNG KHỚP
+          if (priceMatch.status === "KHÔNG KHỚP") {
+            candidateWarning = "Đơn giá không đạt ngưỡng đối chiếu";
+          }
+        } else {
+          scorePrice = 0;
+        }
+      }
+    }
+
+    // 5. Tổng điểm
+    let totalScore = 0;
+    let scoreName = 0;
+
+    if (hasPriceComparison && !isDiffUom) {
+      // Thang điểm khi có so sánh giá: Tên (65) + ĐVT (10) + Quy cách (15) + Đơn giá (10) = 100
+      scoreName = Math.min(65, Math.round((nameRatio / 100) * 65));
+      totalScore = scoreName + scoreUom + scoreSpecs + scorePrice;
+      if (nameRatio === 100 && isSameUom && scorePrice === 10) {
+        totalScore = 100;
+      }
+    } else {
+      // Thang điểm khi không áp dụng giá (Section 7: Điểm đơn giá = 0, không làm giảm điểm các tiêu chí khác):
+      // Tên (75) + ĐVT (10) + Quy cách (15) = 100
+      scoreName = Math.min(75, Math.round((nameRatio / 100) * 75));
+      totalScore = scoreName + scoreUom + scoreSpecs;
+      if (nameRatio === 100 && isSameUom) {
+        totalScore = 100;
+      } else if (nameRatio === 100) {
+        totalScore = Math.max(90, totalScore);
+      }
+    }
+    totalScore = Math.min(100, Math.max(0, Math.round(totalScore)));
+
+    candidateEvaluations.push({
+      candidate: {
+        commodity: item,
+        totalScore,
+        scoreName,
+        scoreSpecs,
+        scoreUom,
+        scorePrice,
+        scoreCategory: 0,
+        priceDiffPct: priceMatch.diffPct,
+        priceMatchPct: priceMatch.matchPct,
+        priceStatus: priceMatch.status,
+        isPriceMatched: priceMatch.isMatched,
+        refPrice: catalogPrice > 0 ? catalogPrice : null
+      },
+      diffAmt: priceMatch.diffAmt,
+      candidateWarning
+    });
+  }
+
+  // Sắp xếp ứng viên theo tổng điểm giảm dần, nếu bằng điểm ưu tiên độ khớp giá cao hơn
+  candidateEvaluations.sort((a, b) => {
+    if (b.candidate.totalScore !== a.candidate.totalScore) {
+      return b.candidate.totalScore - a.candidate.totalScore;
+    }
+    const matchA = a.candidate.priceMatchPct ?? -1;
+    const matchB = b.candidate.priceMatchPct ?? -1;
+    if (matchA !== matchB) return matchB - matchA;
+    return b.candidate.scoreName - a.candidate.scoreName;
+  });
+
+  const top3Candidates = candidateEvaluations.slice(0, 3).map(e => e.candidate);
+  const best = candidateEvaluations[0];
+
+  if (!best) {
+    return {
+      code: "",
+      name: "",
+      score: 0,
+      reason: "Danh mục hàng hóa rỗng",
+      rawPrice,
+      normalizedPrice,
+      priceSource,
+      refPrice: null,
+      refPriceType: "Chung",
+      priceDiffAmt: null,
+      priceDiffPct: null,
+      priceMatchPct: null,
+      priceStatus: "Không áp dụng",
+      isPriceMatched: null,
+      scoreName: 0,
+      scoreSpecs: 0,
+      scoreUom: 0,
+      scorePrice: 0,
+      scoreCategory: 0,
+      priceWarning: null,
+      top3Candidates: []
+    };
+  }
+
+  // Cảnh báo ở cấp dòng
+  let finalPriceWarning: string | null = best.candidateWarning;
+  if (!finalPriceWarning) {
+    if (normalizedPrice === null && (rawPriceVal !== undefined || rawAmtVal !== undefined)) {
+      finalPriceWarning = "Không có đơn giá HĐ";
+    } else if (normalizedPrice !== null && best.candidate.refPrice === null) {
+      finalPriceWarning = "Danh mục chưa có giá";
+    }
+  }
+
+  // Lý do đối chiếu
+  let reason = `Tên: ${best.candidate.scoreName}, ĐVT: ${best.candidate.scoreUom}, Quy cách: ${best.candidate.scoreSpecs}`;
+  if (best.candidate.priceStatus === "KHỚP") {
+    reason += `, Giá khớp ${best.candidate.priceMatchPct}% (+10đ)`;
+  } else if (best.candidate.priceStatus === "KHÔNG KHỚP") {
+    reason += `, Giá khớp ${best.candidate.priceMatchPct}% (Không đạt ${priceThreshold}%, +0đ)`;
+  }
+  if (finalPriceWarning) {
+    reason += ` [${finalPriceWarning}]`;
+  }
+
+  return {
+    code: best.candidate.commodity.ma_hang_hoa,
+    name: best.candidate.commodity.ten_hang_hoa_chuan,
+    score: best.candidate.totalScore,
+    reason,
+    rawPrice,
+    normalizedPrice,
+    priceSource,
+    refPrice: best.candidate.refPrice,
+    refPriceType: "Chung",
+    priceDiffAmt: best.diffAmt,
+    priceDiffPct: best.candidate.priceDiffPct,
+    priceMatchPct: best.candidate.priceMatchPct,
+    priceStatus: best.candidate.priceStatus || "Không áp dụng",
+    isPriceMatched: best.candidate.isPriceMatched ?? null,
+    scoreName: best.candidate.scoreName,
+    scoreSpecs: best.candidate.scoreSpecs,
+    scoreUom: best.candidate.scoreUom,
+    scorePrice: best.candidate.scorePrice,
+    scoreCategory: 0,
+    priceWarning: finalPriceWarning,
+    top3Candidates
+  };
 }
 
 export function matchCommodityRow(

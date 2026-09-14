@@ -8,7 +8,8 @@ export const getSampleCommodities = (): Commodity[] => [
     don_vi_tinh: "Bao",
     quy_cach: "PCB40 50kg",
     tu_khoa_nhan_dien: "ha tien, vicem, pcb40, xi mang",
-    ghi_chu: "Mặt hàng chính bán sỉ"
+    ghi_chu: "Mặt hàng chính bán sỉ",
+    don_gia_tham_chieu: 85000
   },
   {
     ma_hang_hoa: "HH002",
@@ -17,7 +18,8 @@ export const getSampleCommodities = (): Commodity[] => [
     don_vi_tinh: "Kg",
     quy_cach: "Phi 6",
     tu_khoa_nhan_dien: "hoa phat, phi 6, thep cuon",
-    ghi_chu: "Hàng nhập từ tổng nhà máy"
+    ghi_chu: "Hàng nhập từ tổng nhà máy",
+    don_gia_tham_chieu: 15000
   },
   {
     ma_hang_hoa: "HH003",
@@ -26,7 +28,8 @@ export const getSampleCommodities = (): Commodity[] => [
     don_vi_tinh: "Ram",
     quy_cach: "A4 70gsm",
     tu_khoa_nhan_dien: "double a, a4, 70gsm, giay in",
-    ghi_chu: "Đầu mối văn phòng phẩm"
+    ghi_chu: "Đầu mối văn phòng phẩm",
+    don_gia_tham_chieu: 68000
   },
   {
     ma_hang_hoa: "HH004",
@@ -35,7 +38,8 @@ export const getSampleCommodities = (): Commodity[] => [
     don_vi_tinh: "Thùng",
     quy_cach: "5L",
     tu_khoa_nhan_dien: "dulux, lau chui, son noi that, 5l",
-    ghi_chu: "Hàng đại lý cấp 1"
+    ghi_chu: "Hàng đại lý cấp 1",
+    don_gia_tham_chieu: 1050000
   }
 ];
 
@@ -116,7 +120,7 @@ export const getSamplePurchaseLedger = (): RawPurchase[] => [
     thanh_tien: 17000000,
     thue_gtgt: 1700000,
     tong_thanh_toan: 18700000,
-    ghi_chu: "Thanh toán ngân hàng"
+    ghi_chu: "Thanh toán ngân hàng (Đơn giá khớp chuẩn 100%)"
   },
   {
     ngay_hoa_don: "2026-06-02",
@@ -127,15 +131,30 @@ export const getSamplePurchaseLedger = (): RawPurchase[] => [
     ten_hang_hoa_dich_vu: "Thép cuộn phi 6 chính hãng Hòa Phát",
     don_vi_tinh: "Kg",
     so_luong: 1200,
-    don_gia: 15000,
-    thanh_tien: 18000000,
-    thue_gtgt: 1800000,
-    tong_thanh_toan: 19800000,
-    ghi_chu: "Nhập kho cơ sở 1"
+    don_gia: 15200,
+    thanh_tien: 18240000,
+    thue_gtgt: 1824000,
+    tong_thanh_toan: 20064000,
+    ghi_chu: "Nhập kho cơ sở 1 (Đơn giá khớp 98.7% >= 90% -> KHỚP +10đ)"
   },
   {
     ngay_hoa_don: "2026-06-03",
     so_hoa_don: "0000219",
+    ky_hieu_hoa_don: "B26TBA",
+    ten_nguoi_ban: "Công ty TNHH Văn phòng phẩm Tiến Đạt",
+    ma_so_thue_nguoi_ban: "0108988776",
+    ten_hang_hoa_dich_vu: "Giấy Double A A4 định lượng 70gsm",
+    don_vi_tinh: "Ram",
+    so_luong: 50,
+    don_gia: 0,
+    thanh_tien: 3400000,
+    thue_gtgt: 340000,
+    tong_thanh_toan: 3740000,
+    ghi_chu: "Đơn giá rỗng, tự động suy ra = 3.400.000 / 50 = 68.000đ"
+  },
+  {
+    ngay_hoa_don: "2026-06-04",
+    so_hoa_don: "0000220",
     ky_hieu_hoa_don: "B26TBA",
     ten_nguoi_ban: "Công ty TNHH Sơn Nippon Việt Nam",
     ma_so_thue_nguoi_ban: "0405060708",
@@ -146,7 +165,22 @@ export const getSamplePurchaseLedger = (): RawPurchase[] => [
     thanh_tien: 16500000,
     thue_gtgt: 1650000,
     tong_thanh_toan: 18150000,
-    ghi_chu: "Hàng nhập thử nghiệm"
+    ghi_chu: "Mặt hàng mới hoàn toàn, tự động tạo mã HH mới"
+  },
+  {
+    ngay_hoa_don: "2026-06-05",
+    so_hoa_don: "0000221",
+    ky_hieu_hoa_don: "B26TBA",
+    ten_nguoi_ban: "Công ty Cổ phần Xi măng Hà Tiên 1",
+    ma_so_thue_nguoi_ban: "0908070605",
+    ten_hang_hoa_dich_vu: "Xi măng Vicem Hà Tiên đa dụng xá",
+    don_vi_tinh: "Tấn",
+    so_luong: 10,
+    don_gia: 1650000,
+    thanh_tien: 16500000,
+    thue_gtgt: 1650000,
+    tong_thanh_toan: 18150000,
+    ghi_chu: "ĐVT khác nhau (Tấn vs Bao) -> Cảnh báo ĐVT khác nhau"
   }
 ];
 

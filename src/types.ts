@@ -42,11 +42,7 @@ export interface MatchingConfig {
   // Cấu hình bổ sung tiêu chí Đơn giá hàng hóa
   enablePriceMatching?: boolean;
   allowDerivedPrice?: boolean;
-  priceRefSource?: "median" | "latest" | "master";
-  priceDiffThresholdVeryHigh?: number; // e.g., 2% -> 20 pts
-  priceDiffThresholdHigh?: number;     // e.g., 5% -> 15 pts
-  priceDiffThresholdMedium?: number;   // e.g., 10% -> 10 pts
-  priceDiffThresholdLow?: number;      // e.g., 20% -> 5 pts
+  priceMatchThreshold?: number; // default 90 (%)
   allowUomConversion?: boolean;
 }
 
@@ -59,6 +55,9 @@ export interface CommodityCandidate {
   scorePrice: number;
   scoreCategory: number;
   priceDiffPct?: number | null;
+  priceMatchPct?: number | null;
+  priceStatus?: "KHỚP" | "KHÔNG KHỚP" | "Không áp dụng";
+  isPriceMatched?: boolean | null;
   refPrice?: number | null;
 }
 
@@ -85,6 +84,9 @@ export interface MappedRow {
   refPriceType?: "Trung vị" | "Mua mới nhất" | "Bán mới nhất" | "Chung";
   priceDiffAmt?: number | null;
   priceDiffPct?: number | null;
+  priceMatchPct?: number | null;
+  priceStatus?: "KHỚP" | "KHÔNG KHỚP" | "Không áp dụng";
+  isPriceMatched?: boolean | null;
   scoreName?: number;
   scoreSpecs?: number;
   scoreUom?: number;

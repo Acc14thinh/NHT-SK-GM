@@ -35,6 +35,8 @@ import * as XLSX from "xlsx";
 import JSZip from "jszip";
 import {
   matchCommodityRow,
+  matchCommodityRowWithPrice,
+  calculatePriceMatch,
   matchPartnerRow,
   analyzeBankTransaction,
   generateNewCode,
@@ -82,7 +84,10 @@ export default function App() {
     daysAfterInvoice: 30,
     diffAbsThreshold: 10000,
     diffPctThreshold: 0.5,
-    maxCombinationCount: 5
+    maxCombinationCount: 5,
+    priceMatchThreshold: 90,
+    enablePriceMatching: true,
+    allowDerivedPrice: true
   });
 
   // Navigation Menu
@@ -383,11 +388,23 @@ export default function App() {
             return hNorm.includes("ghi_chu") || hNorm.includes("ghi chú") || hNorm.includes("note");
           }) || "";
 
+          const mappedGia = headers.find(h => {
+            const hNorm = h.toLowerCase();
+            return hNorm.includes("don_gia") || hNorm.includes("đơn giá") || hNorm.includes("gia_tham_chieu") || hNorm.includes("giá tham chiếu") || hNorm.includes("don_gia_tham_chieu") || hNorm.includes("price") || hNorm === "giá";
+          }) || "";
+
           const parsedCommodities: Commodity[] = jsonData.map((row: any) => {
             const code = String(row[mappedMa] || "").trim();
             const name = String(row[mappedTen] || "").trim();
             if (!name) return null;
             const finalCode = code || "HH-" + Math.random().toString(36).substr(2, 5).toUpperCase();
+
+            let parsedPrice: number | undefined = undefined;
+            if (mappedGia && row[mappedGia] !== undefined && row[mappedGia] !== null) {
+              const num = typeof row[mappedGia] === "number" ? row[mappedGia] : parseFloat(String(row[mappedGia]).replace(/[^0-9.-]/g, ""));
+              if (!isNaN(num) && num > 0) parsedPrice = num;
+            }
+
             return {
               ma_hang_hoa: finalCode,
               ten_hang_hoa_chuan: name,
@@ -395,7 +412,8 @@ export default function App() {
               don_vi_tinh: String(row[mappedDvt] || "Cái").trim(),
               quy_cach: String(row[mappedQuyCach] || "").trim(),
               tu_khoa_nhan_dien: String(row[mappedTuKhoa] || name).trim(),
-              ghi_chu: String(row[mappedGhiChu] || "").trim()
+              ghi_chu: String(row[mappedGhiChu] || "").trim(),
+              don_gia_tham_chieu: parsedPrice
             };
           }).filter(Boolean) as Commodity[];
 
@@ -1215,8 +1233,19 @@ export default function App() {
       const results = commoditySourceRows.map((row, index) => {
         const desc = String(row[commodityMappings.ten_hang_hoa] !== undefined && row[commodityMappings.ten_hang_hoa] !== null ? row[commodityMappings.ten_hang_hoa] : "");
         const uom = String(row[commodityMappings.don_vi_tinh] !== undefined && row[commodityMappings.don_vi_tinh] !== null ? row[commodityMappings.don_vi_tinh] : "");
+        const rawPriceVal = row[commodityMappings.don_gia];
+        const rawQtyVal = row[commodityMappings.so_luong];
+        const rawAmtVal = row[commodityMappings.thanh_tien_chua_thue] || row[commodityMappings.thanh_tien];
 
-        const match = matchCommodityRow(desc, uom, tempCommodities, config.autoThreshold, config.autoThreshold);
+        const match = matchCommodityRowWithPrice(
+          desc,
+          uom,
+          rawPriceVal,
+          rawQtyVal,
+          rawAmtVal,
+          tempCommodities,
+          config
+        );
 
         let treatment: MappedRow["treatment"] = "TỰ ĐỘNG GẮN";
         let finalizedCode = match.code;
@@ -1230,21 +1259,22 @@ export default function App() {
           treatment = "TẠO MÃ MỚI";
           const newCode = generateNewCode(config.prefixHH, existingCodes);
           finalizedCode = newCode;
-          finalizedName = desc.trim();
+          finalizedName = desc.trim() || `Hàng hóa mới ${newCode}`;
           existingCodes.push(newCode);
 
           // Append to temp directory so subsequent rows can match this newly created code if identical
           const newItem: Commodity = {
             ma_hang_hoa: finalizedCode,
             ten_hang_hoa_chuan: finalizedName,
-            nhom_hang: "Vật tư xây dựng",
-            don_vi_tinh: uom || "Bao",
+            nhom_hang: "Chưa phân loại",
+            don_vi_tinh: uom || "Cái",
             quy_cach: "Tự động sinh mới",
             tu_khoa_nhan_dien: "",
-            ghi_chu: `Mã tự động sinh từ dòng HĐ: ${desc}`
+            ghi_chu: `Mã tự động sinh từ dòng HĐ: ${desc}`,
+            don_gia_tham_chieu: match.normalizedPrice || undefined
           };
           tempCommodities.push(newItem);
-          finalReason = `Điểm tương đồng thấp (${match.score}% < ${config.autoThreshold}%). Tự động tạo mã hàng mới.`;
+          finalReason = `Điểm tin cậy (${match.score}% < ${config.autoThreshold}%). Tự động tạo mã hàng mới.`;
           finalScore = match.score;
         }
 
@@ -1258,7 +1288,25 @@ export default function App() {
           reason: finalReason,
           treatment,
           notes: "",
-          rawRowData: row
+          rawRowData: row,
+          rawPrice: match.rawPrice,
+          normalizedPrice: match.normalizedPrice,
+          priceSource: match.priceSource,
+          refPrice: match.refPrice,
+          refPriceType: match.refPriceType,
+          priceDiffAmt: match.priceDiffAmt,
+          priceDiffPct: match.priceDiffPct,
+          priceMatchPct: match.priceMatchPct,
+          priceStatus: match.priceStatus,
+          isPriceMatched: match.isPriceMatched,
+          scoreName: match.scoreName,
+          scoreSpecs: match.scoreSpecs,
+          scoreUom: match.scoreUom,
+          scorePrice: match.scorePrice,
+          scoreCategory: match.scoreCategory,
+          priceWarning: match.priceWarning,
+          top3Candidates: match.top3Candidates,
+          processingStatus: match.score >= config.autoThreshold ? "Khớp tự động" : "Cần rà soát"
         } as MappedRow;
       });
 
@@ -1620,11 +1668,32 @@ export default function App() {
       prev.map(row => {
         if (row.id === id) {
           const matchingItem = commodities.find(c => c.ma_hang_hoa === newCode);
+          const candMatch = row.top3Candidates?.find(c => c.commodity.ma_hang_hoa === newCode);
+
+          const newRefPrice = candMatch ? candMatch.refPrice : (matchingItem?.don_gia_tham_chieu || null);
+          const priceCalc = calculatePriceMatch(row.normalizedPrice, newRefPrice, config.priceMatchThreshold ?? 90);
+
+          let newWarning = row.priceWarning;
+          if (priceCalc.status === "KHÔNG KHỚP") {
+            newWarning = "Đơn giá không đạt ngưỡng đối chiếu";
+          } else if (priceCalc.status === "KHỚP") {
+            newWarning = null;
+          }
+
           return {
             ...row,
             proposedCode: newCode,
             proposedName: matchingItem ? matchingItem.ten_hang_hoa_chuan : row.proposedName,
-            treatment: "Đã chốt" as any
+            refPrice: newRefPrice,
+            priceDiffPct: priceCalc.diffPct,
+            priceDiffAmt: priceCalc.diffAmt,
+            priceMatchPct: priceCalc.matchPct,
+            priceStatus: priceCalc.status,
+            isPriceMatched: priceCalc.isMatched,
+            priceWarning: newWarning,
+            score: candMatch ? candMatch.totalScore : row.score,
+            scorePrice: candMatch ? candMatch.scorePrice : priceCalc.scorePrice,
+            treatment: "TỰ ĐỘNG GẮN"
           };
         }
         return row;
@@ -1679,7 +1748,12 @@ export default function App() {
       baseRow["Mã hàng hóa"] = row.proposedCode;
       baseRow["Tên hàng hóa chuẩn"] = row.proposedName;
       baseRow["Tên hàng hóa chuẩn hóa"] = normalizeText(row.originalText);
-      baseRow["Độ tương thích"] = `${row.score}%`;
+      baseRow["Đơn giá bảng kê"] = row.normalizedPrice !== null && row.normalizedPrice !== undefined ? row.normalizedPrice : "";
+      baseRow["Đơn giá tham chiếu"] = row.refPrice !== null && row.refPrice !== undefined ? row.refPrice : "";
+      baseRow["Độ khớp đơn giá (%)"] = row.priceMatchPct !== null && row.priceMatchPct !== undefined ? `${row.priceMatchPct}%` : "";
+      baseRow["Kết quả đơn giá"] = row.priceStatus || "";
+      baseRow["Điểm đơn giá"] = row.scorePrice ?? 0;
+      baseRow["Tổng điểm gắn mã"] = `${row.score}%`;
       baseRow["Mức độ tương thích"] = row.score >= config.autoThreshold ? "Cao" : "Thấp";
       baseRow["Lý do gắn mã"] = row.reason;
       baseRow["Trạng thái xử lý"] = row.treatment === "TỰ ĐỘNG GẮN" ? "Đã chốt" : "Cần kiểm tra";
@@ -2476,7 +2550,7 @@ export default function App() {
               </div>
 
               {config.enablePriceMatching !== false && (
-                <div className="space-y-2.5 text-xs pt-1 border-t border-[#141414]/20">
+                <div className="space-y-3 text-xs pt-2 border-t border-[#141414]/20">
                   <div className="flex items-center justify-between gap-2">
                     <label className="text-[10px] uppercase font-black text-[#555]">Cho phép đơn giá suy ra (Thành tiền / SL)</label>
                     <input
@@ -2487,59 +2561,33 @@ export default function App() {
                     />
                   </div>
 
-                  <div>
-                    <label className="text-[10px] uppercase font-black text-[#555] block mb-1">Nguồn giá tham chiếu</label>
-                    <select
-                      value={config.priceRefSource || "median"}
-                      onChange={(e) => setConfig({ ...config, priceRefSource: e.target.value as any })}
-                      className="w-full border-2 border-[#141414] bg-white p-1 text-[11px] font-bold text-black focus:outline-none"
-                    >
-                      <option value="median">Đơn giá trung vị lịch sử / Danh mục</option>
-                      <option value="latest">Đơn giá mua/bán gần nhất</option>
-                      <option value="master">Đơn giá tham chiếu cố định danh mục</option>
-                    </select>
-                  </div>
+                  {/* Thanh kéo duy nhất: ĐỘ KHỚP ĐƠN GIÁ TỐI THIỂU */}
+                  <div className="space-y-2 pt-2 border-t border-slate-200">
+                    <div className="flex justify-between items-center">
+                      <label className="text-[10px] uppercase font-black text-[#141414] tracking-wider">
+                        ĐỘ KHỚP ĐƠN GIÁ TỐI THIỂU
+                      </label>
+                      <span className="font-mono text-xs font-black bg-[#141414] text-[#00ff00] px-2 py-0.5 border border-black shadow-[1px_1px_0px_#141414]">
+                        {config.priceMatchThreshold ?? 90}%
+                      </span>
+                    </div>
 
-                  <div className="grid grid-cols-2 gap-2 text-[10px]">
-                    <div>
-                      <label className="uppercase font-black text-[#555]">Lệch rất thấp (&le; %)</label>
+                    <div className="flex items-center gap-2 text-[10px] font-mono text-slate-500 font-bold">
+                      <span>0%</span>
                       <input
-                        type="number"
-                        value={config.priceDiffThresholdVeryHigh ?? 2}
-                        onChange={(e) => setConfig({ ...config, priceDiffThresholdVeryHigh: parseFloat(e.target.value) || 0 })}
-                        className="w-full border-2 border-[#141414] bg-white p-1 font-mono text-xs font-bold text-black"
+                        type="range"
+                        min="0"
+                        max="100"
+                        step="1"
+                        value={config.priceMatchThreshold ?? 90}
+                        onChange={(e) => setConfig({ ...config, priceMatchThreshold: parseInt(e.target.value) || 0 })}
+                        className="w-full h-2.5 bg-[#e5e5e0] border-2 border-[#141414] appearance-none cursor-pointer accent-[#00ff00]"
                       />
-                      <span className="text-[9px] text-green-700 font-bold">+20 điểm</span>
+                      <span>100%</span>
                     </div>
-                    <div>
-                      <label className="uppercase font-black text-[#555]">Lệch thấp (&le; %)</label>
-                      <input
-                        type="number"
-                        value={config.priceDiffThresholdHigh ?? 5}
-                        onChange={(e) => setConfig({ ...config, priceDiffThresholdHigh: parseFloat(e.target.value) || 0 })}
-                        className="w-full border-2 border-[#141414] bg-white p-1 font-mono text-xs font-bold text-black"
-                      />
-                      <span className="text-[9px] text-emerald-700 font-bold">+15 điểm</span>
-                    </div>
-                    <div>
-                      <label className="uppercase font-black text-[#555]">Lệch vừa (&le; %)</label>
-                      <input
-                        type="number"
-                        value={config.priceDiffThresholdMedium ?? 10}
-                        onChange={(e) => setConfig({ ...config, priceDiffThresholdMedium: parseFloat(e.target.value) || 0 })}
-                        className="w-full border-2 border-[#141414] bg-white p-1 font-mono text-xs font-bold text-black"
-                      />
-                      <span className="text-[9px] text-amber-700 font-bold">+10 điểm</span>
-                    </div>
-                    <div>
-                      <label className="uppercase font-black text-[#555]">Lệch cao (&le; %)</label>
-                      <input
-                        type="number"
-                        value={config.priceDiffThresholdLow ?? 20}
-                        onChange={(e) => setConfig({ ...config, priceDiffThresholdLow: parseFloat(e.target.value) || 0 })}
-                        className="w-full border-2 border-[#141414] bg-white p-1 font-mono text-xs font-bold text-black"
-                      />
-                      <span className="text-[9px] text-orange-700 font-bold">+5 điểm</span>
+
+                    <div className="bg-[#f0f0ed] p-2 border border-slate-300 text-[11px] text-slate-800 font-medium">
+                      Đơn giá có độ khớp từ <span className="text-black font-extrabold underline">{config.priceMatchThreshold ?? 90}%</span> trở lên được xem là phù hợp (cộng 10 điểm).
                     </div>
                   </div>
                 </div>
@@ -3004,14 +3052,15 @@ export default function App() {
                     <table className="w-full text-left text-xs border-collapse">
                       <thead>
                         <tr className="bg-[#f0f0ed] border-b-2 border-[#141414] font-black uppercase text-black tracking-wider text-[11px]">
-                          <th className="p-3 pl-6">Nội dung diễn giải gốc</th>
+                          <th className="p-3 pl-6">Nội dung diễn giải</th>
                           <th className="p-3">ĐVT</th>
-                          <th className="p-3">Đơn giá HĐ (Nguồn)</th>
+                          <th className="p-3">Đơn giá bảng kê</th>
                           <th className="p-3">Mã hàng đề xuất</th>
-                          <th className="p-3">Giá tham chiếu</th>
-                          <th className="p-3">Chênh lệch giá</th>
+                          <th className="p-3">Đơn giá tham chiếu</th>
+                          <th className="p-3">Độ khớp đơn giá (%)</th>
+                          <th className="p-3">Kết quả đơn giá</th>
+                          <th className="p-3 text-center">Điểm đơn giá</th>
                           <th className="p-3 text-center">Tổng điểm</th>
-                          <th className="p-3">Điểm thành phần</th>
                           <th className="p-3">Ứng viên</th>
                           <th className="p-3 pr-6">Trạng thái</th>
                         </tr>
@@ -3019,8 +3068,8 @@ export default function App() {
                       <tbody className="divide-y divide-[#141414]/10">
                         {commodityMappedRows.slice(0, commodityLimit).map((row) => (
                           <tr key={row.id} className="hover:bg-[#f0f0ed]/30 transition">
-                            <td className="p-3 pl-6 max-w-xs truncate font-bold text-black">
-                              <div>{row.originalText}</div>
+                            <td className="p-3 pl-6 max-w-xs font-bold text-black">
+                              <div className="truncate">{row.originalText}</div>
                               {row.priceWarning && (
                                 <div className="text-[10px] font-bold text-red-600 bg-red-50 border border-red-200 px-1 py-0.5 mt-0.5 w-fit">
                                   ⚠️ {row.priceWarning}
@@ -3076,23 +3125,20 @@ export default function App() {
                             </td>
                             <td className="p-3 font-mono text-[11px]">
                               {row.refPrice !== null && row.refPrice !== undefined ? (
-                                <div>
-                                  <span className="font-bold text-slate-800">{row.refPrice.toLocaleString("vi-VN")}đ</span>
-                                  <span className="block text-[9px] text-slate-500">({row.refPriceType || "Lịch sử"})</span>
-                                </div>
+                                <span className="font-bold text-slate-800">{row.refPrice.toLocaleString("vi-VN")}đ</span>
                               ) : (
                                 <span className="text-slate-400">Chưa có giá</span>
                               )}
                             </td>
                             <td className="p-3 font-mono text-[11px]">
-                              {row.priceDiffPct !== null && row.priceDiffPct !== undefined ? (
+                              {row.priceMatchPct !== null && row.priceMatchPct !== undefined ? (
                                 <div>
-                                  <span className={`font-bold ${row.priceDiffPct <= 5 ? "text-green-700" : row.priceDiffPct <= 10 ? "text-amber-700" : "text-red-700"}`}>
-                                    {row.priceDiffPct.toFixed(1)}%
+                                  <span className={`font-black text-xs ${row.priceMatchPct >= (config.priceMatchThreshold ?? 90) ? "text-green-700" : "text-red-600"}`}>
+                                    {row.priceMatchPct}%
                                   </span>
                                   {row.priceDiffAmt !== null && row.priceDiffAmt !== undefined && (
-                                    <span className="block text-[9px] text-slate-500">
-                                      ({row.priceDiffAmt.toLocaleString("vi-VN")}đ)
+                                    <span className="block text-[9px] text-slate-500 font-normal">
+                                      (Lệch {row.priceDiffAmt.toLocaleString("vi-VN")}đ)
                                     </span>
                                   )}
                                 </div>
@@ -3100,17 +3146,33 @@ export default function App() {
                                 <span className="text-slate-400">--</span>
                               )}
                             </td>
+                            <td className="p-3">
+                              {row.priceStatus === "KHỚP" ? (
+                                <span className="inline-block px-2 py-0.5 border border-black bg-[#00ff00] text-black font-black text-[10px] font-mono shadow-[1px_1px_0px_#141414]">
+                                  KHỚP
+                                </span>
+                              ) : row.priceStatus === "KHÔNG KHỚP" ? (
+                                <span className="inline-block px-2 py-0.5 border border-red-300 bg-red-100 text-red-700 font-black text-[10px] font-mono">
+                                  KHÔNG KHỚP
+                                </span>
+                              ) : (
+                                <span className="text-slate-400 text-[10px] italic">Không áp dụng</span>
+                              )}
+                            </td>
+                            <td className="p-3 font-mono text-center">
+                              <span className={`font-black text-xs ${row.scorePrice && row.scorePrice > 0 ? "text-green-700 font-bold" : "text-slate-400"}`}>
+                                {row.scorePrice && row.scorePrice > 0 ? `+${row.scorePrice}` : "+0"}
+                              </span>
+                            </td>
                             <td className="p-3 text-center">
                               <span className={`inline-block px-1.5 py-0.5 border border-black font-black font-mono text-[10px] ${
                                 row.score >= config.autoThreshold ? "bg-[#00ff00] text-black" : "bg-yellow-300 text-black"
                               }`}>
                                 {row.score}%
                               </span>
-                            </td>
-                            <td className="p-3 text-[10px] font-mono text-slate-600 space-y-0.5">
-                              <div>Tên: <span className="font-bold">{row.scoreName ?? 0}/45</span></div>
-                              <div>ĐVT: <span className="font-bold">{row.scoreUom ?? 0}/10</span> | Quy cách: <span className="font-bold">{row.scoreSpecs ?? 0}/20</span></div>
-                              <div>Giá: <span className="font-bold text-indigo-700">{row.scorePrice ?? 0}/20</span></div>
+                              <div className="text-[9px] text-slate-500 font-mono mt-0.5">
+                                Tên:{row.scoreName ?? 0} ĐVT:{row.scoreUom ?? 0} QC:{row.scoreSpecs ?? 0}
+                              </div>
                             </td>
                             <td className="p-3">
                               {row.top3Candidates && row.top3Candidates.length > 0 ? (
@@ -4327,15 +4389,15 @@ unidecode>=1.3.8`}
                         </span>
                       </div>
                       <div>
-                        <span className="text-slate-400">Chênh lệch giá:</span>{" "}
-                        <span className={`font-bold ${cand.priceDiffPct !== null && cand.priceDiffPct !== undefined && cand.priceDiffPct <= 5 ? "text-green-700" : "text-amber-700"}`}>
-                          {cand.priceDiffPct !== null && cand.priceDiffPct !== undefined ? `${cand.priceDiffPct.toFixed(1)}%` : "--"}
+                        <span className="text-slate-400">Độ khớp giá:</span>{" "}
+                        <span className={`font-bold ${cand.priceStatus === "KHỚP" ? "text-green-700 font-black" : cand.priceStatus === "KHÔNG KHỚP" ? "text-red-600 font-black" : "text-slate-400"}`}>
+                          {cand.priceMatchPct !== null && cand.priceMatchPct !== undefined ? `${cand.priceMatchPct}% (${cand.priceStatus})` : "--"}
                         </span>
                       </div>
                       <div>
-                        <span className="text-slate-400">Phân rã điểm:</span>{" "}
+                        <span className="text-slate-400">Điểm phân rã:</span>{" "}
                         <span className="font-bold text-indigo-700">
-                          Tên:{cand.scoreName}/45, ĐVT:{cand.scoreUom}/10, Quy cách:{cand.scoreSpecs}/20, Giá:{cand.scorePrice}/20
+                          Tên:{cand.scoreName}, ĐVT:{cand.scoreUom}, QC:{cand.scoreSpecs}, Giá:+{cand.scorePrice}
                         </span>
                       </div>
                     </div>
