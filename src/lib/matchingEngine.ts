@@ -446,26 +446,20 @@ export function matchCommodityRowWithPrice(
     }
 
     // 5. Tổng điểm
-    let totalScore = 0;
-    let scoreName = 0;
+    // Nguyên tắc: Không được làm giảm điểm của các tiêu chí khác (Tên, ĐVT, Quy cách)
+    // Thang điểm cơ bản: Tên (75) + ĐVT (10) + Quy cách (15) = 100 điểm tối đa.
+    const scoreName = Math.min(75, Math.round((nameRatio / 100) * 75));
+    const baseScore = scoreName + scoreUom + scoreSpecs;
 
-    if (hasPriceComparison && !isDiffUom) {
-      // Thang điểm khi có so sánh giá: Tên (65) + ĐVT (10) + Quy cách (15) + Đơn giá (10) = 100
-      scoreName = Math.min(65, Math.round((nameRatio / 100) * 65));
-      totalScore = scoreName + scoreUom + scoreSpecs + scorePrice;
-      if (nameRatio === 100 && isSameUom && scorePrice === 10) {
-        totalScore = 100;
-      }
-    } else {
-      // Thang điểm khi không áp dụng giá (Section 7: Điểm đơn giá = 0, không làm giảm điểm các tiêu chí khác):
-      // Tên (75) + ĐVT (10) + Quy cách (15) = 100
-      scoreName = Math.min(75, Math.round((nameRatio / 100) * 75));
-      totalScore = scoreName + scoreUom + scoreSpecs;
-      if (nameRatio === 100 && isSameUom) {
-        totalScore = 100;
-      } else if (nameRatio === 100) {
-        totalScore = Math.max(90, totalScore);
-      }
+    // Đơn giá là tiêu chí phụ (+10 điểm hỗ trợ nếu đạt ngưỡng, +0 nếu không đạt hoặc không có giá)
+    let totalScore = baseScore;
+    if (hasPriceComparison && !isDiffUom && scorePrice > 0) {
+      // Chỉ tăng độ tin cậy khi tên hàng đạt ngưỡng tối thiểu
+      totalScore = Math.min(100, baseScore + scorePrice);
+    } else if (nameRatio === 100 && isSameUom) {
+      totalScore = 100;
+    } else if (nameRatio === 100) {
+      totalScore = Math.max(90, totalScore);
     }
     totalScore = Math.min(100, Math.max(0, Math.round(totalScore)));
 

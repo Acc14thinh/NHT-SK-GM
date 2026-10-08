@@ -45,6 +45,7 @@ import {
   preProcessInvoicePartners,
   parseDate
 } from "./lib/matchingEngine";
+import { EcommerceReconciliationView } from "./components/ecommerce/EcommerceReconciliationView";
 import {
   cleanAndDeduplicateHeaders,
   scoreHeaderRow,
@@ -91,7 +92,7 @@ export default function App() {
   });
 
   // Navigation Menu
-  const [currentTab, setCurrentTab] = useState<"dashboard" | "commodity" | "partner" | "bank" | "integrated" | "python">("dashboard");
+  const [currentTab, setCurrentTab] = useState<"dashboard" | "commodity" | "partner" | "bank" | "integrated" | "ecommerce" | "python">("dashboard");
 
   // Demonstration state
   const [demoLoaded, setDemoLoaded] = useState(false);
@@ -1253,8 +1254,16 @@ export default function App() {
         let finalReason = match.reason;
         let finalScore = match.score;
 
-        if (match.score >= config.autoThreshold) {
+        // Section 6: Không tạo mã mới chỉ vì giá không khớp
+        // Nếu tên hàng/quy cách/ĐVT khớp cao (điểm cơ bản không tính giá >= autoThreshold - 10 hoặc scoreName >= 50),
+        // và đã có mã ứng viên phù hợp, thì VẪN ưu tiên mã hàng hóa hiện có, không tự tạo mã mới.
+        const isBaseMatchGood = (match.scoreName + match.scoreUom + match.scoreSpecs) >= (config.autoThreshold - 10) || match.scoreName >= 50;
+
+        if (match.score >= config.autoThreshold || (isBaseMatchGood && match.code)) {
           treatment = "TỰ ĐỘNG GẮN";
+          if (match.priceStatus === "KHÔNG KHỚP") {
+            finalReason = `Khớp mã danh mục hiện có (${match.score}%). Đơn giá không đạt ngưỡng đối chiếu.`;
+          }
         } else {
           treatment = "TẠO MÃ MỚI";
           const newCode = generateNewCode(config.prefixHH, existingCodes);
@@ -2587,7 +2596,7 @@ export default function App() {
                     </div>
 
                     <div className="bg-[#f0f0ed] p-2 border border-slate-300 text-[11px] text-slate-800 font-medium">
-                      Đơn giá có độ khớp từ <span className="text-black font-extrabold underline">{config.priceMatchThreshold ?? 90}%</span> trở lên được xem là phù hợp (cộng 10 điểm).
+                      Đơn giá đạt từ <span className="text-black font-extrabold underline">{config.priceMatchThreshold ?? 90}%</span> trở lên sẽ được tính là khớp.
                     </div>
                   </div>
                 </div>
@@ -2781,6 +2790,17 @@ export default function App() {
             >
               <span className={`w-2 h-2 border border-black inline-block ${currentTab === "integrated" ? "bg-[#00ff00]" : "bg-white"}`}></span>
               🧩 Đa phân hệ chéo
+            </button>
+            <button
+              onClick={() => setCurrentTab("ecommerce")}
+              className={`px-4 py-2 text-[11px] font-black uppercase tracking-wider transition flex items-center gap-2.5 cursor-pointer ${
+                currentTab === "ecommerce"
+                  ? "bg-[#141414] text-white border-2 border-transparent shadow-[4px_4px_0px_#00ff00]"
+                  : "bg-white text-black border-2 border-[#141414] shadow-[2px_2px_0px_#141414] hover:bg-[#f0f0ed]"
+              }`}
+            >
+              <span className={`w-2 h-2 border border-black inline-block ${currentTab === "ecommerce" ? "bg-[#00ff00]" : "bg-white"}`}></span>
+              🛒 Doanh Thu Sàn TMĐT
             </button>
             <button
               onClick={() => setCurrentTab("python")}
@@ -3135,6 +3155,9 @@ export default function App() {
                                 <div>
                                   <span className={`font-black text-xs ${row.priceMatchPct >= (config.priceMatchThreshold ?? 90) ? "text-green-700" : "text-red-600"}`}>
                                     {row.priceMatchPct}%
+                                  </span>
+                                  <span className="block text-[9px] text-slate-500 font-medium">
+                                    (Ngưỡng: {config.priceMatchThreshold ?? 90}%)
                                   </span>
                                   {row.priceDiffAmt !== null && row.priceDiffAmt !== undefined && (
                                     <span className="block text-[9px] text-slate-500 font-normal">
@@ -4250,6 +4273,11 @@ export default function App() {
                 </div>
               )}
             </div>
+          )}
+
+          {/* --- TAB CONTENT: ECOMMERCE RECONCILIATION --- */}
+          {currentTab === "ecommerce" && (
+            <EcommerceReconciliationView />
           )}
 
           {/* --- TAB CONTENT 6: PYTHON SOURCE CODE VIEWER --- */}
