@@ -46,6 +46,9 @@ import {
   parseDate
 } from "./lib/matchingEngine";
 import { EcommerceReconciliationView } from "./components/ecommerce/EcommerceReconciliationView";
+import { AppSidebar, NavTabId } from "./components/layout/AppSidebar";
+import { AppHeader } from "./components/layout/AppHeader";
+import { AlgorithmSettingsView } from "./components/settings/AlgorithmSettingsView";
 import {
   cleanAndDeduplicateHeaders,
   scoreHeaderRow,
@@ -91,8 +94,11 @@ export default function App() {
     allowDerivedPrice: true
   });
 
-  // Navigation Menu
-  const [currentTab, setCurrentTab] = useState<"dashboard" | "commodity" | "partner" | "bank" | "integrated" | "ecommerce" | "python">("dashboard");
+  // Navigation Menu & Dashboard Shell State
+  const [currentTab, setCurrentTab] = useState<NavTabId>("dashboard");
+  const [sidebarCollapsed, setSidebarCollapsed] = useState(false);
+  const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
+  const [settingsDrawerOpen, setSettingsDrawerOpen] = useState(false);
 
   // Demonstration state
   const [demoLoaded, setDemoLoaded] = useState(false);
@@ -2459,361 +2465,39 @@ export default function App() {
         </div>
       )}
 
-      {/* --- APPLICATION HEADER BAR --- */}
-      <header className="bg-[#f0f0ed] text-black border-b-4 border-[#141414] sticky top-0 z-40 shadow-[0_4px_0_rgba(20,20,20,0.05)]">
-        <div className="max-w-7xl mx-auto px-6 py-4 flex flex-col sm:flex-row justify-between items-center gap-4">
-          <div className="flex items-center gap-3">
-            <div className="bg-white border-2 border-[#141414] p-2.5 px-4 shadow-[4px_4px_0px_#141414] flex items-center gap-3">
-              <div className="bg-[#00ff00] text-[#141414] p-1.5 border border-[#141414] font-bold">
-                <RefreshCw size={20} className="animate-spin-slow text-black" />
-              </div>
-              <div>
-                <h1 className="text-sm font-black tracking-tighter uppercase leading-none text-[#1a1a1a]">SmartLedger AutoCoder</h1>
-                <p className="text-[10px] uppercase font-bold tracking-[0.15em] text-[#666] mt-0.5">AUTO-ACCOUNTING MAPPER</p>
-              </div>
-            </div>
-          </div>
+      {/* --- MODERN ADMIN DASHBOARD APP SHELL --- */}
+      <div className="min-h-screen bg-[#fdfdfb] text-[#1a1a1a] flex">
+        {/* Fixed / Collapsible Left Sidebar */}
+        <AppSidebar
+          currentTab={currentTab}
+          onSelectTab={(tab) => setCurrentTab(tab)}
+          isCollapsed={sidebarCollapsed}
+          onToggleCollapse={() => setSidebarCollapsed(!sidebarCollapsed)}
+          isMobileOpen={mobileMenuOpen}
+          onCloseMobile={() => setMobileMenuOpen(false)}
+          commoditiesCount={commodities.length}
+          partnersCount={partners.length}
+        />
 
-          <div className="flex items-center gap-3">
-            {uploadedFileName ? (
-              <span className="text-black text-xs bg-white px-3 py-1.5 border-2 border-[#141414] shadow-[2px_2px_0px_#141414] flex items-center gap-2 font-mono font-bold">
-                <FileSpreadsheet size={14} className="text-green-600" />
-                <span>{uploadedFileName} ({activeRowsCount} dòng)</span>
-              </span>
-            ) : (
-              <button
-                id="load_demo_btn"
-                onClick={handleLoadDemo}
-                className="bg-[#00ff00] hover:bg-[#05e005] hover:shadow-[6px_6px_0px_#141414] hover:-translate-y-0.5 active:translate-y-0 text-black border-2 border-[#141414] text-xs font-black uppercase px-4.5 py-1.5 shadow-[4px_4px_0px_#141414] transition cursor-pointer"
-              >
-                💡 Chạy thử dữ liệu Demo Mẫu
-              </button>
-            )}
+        {/* Right Main Content Area */}
+        <div
+          className={`flex-1 flex flex-col min-w-0 transition-all duration-200 ease-in-out ${
+            sidebarCollapsed ? "lg:pl-18" : "lg:pl-68"
+          }`}
+        >
+          {/* Top Admin Header */}
+          <AppHeader
+            currentTab={currentTab}
+            onOpenMobileMenu={() => setMobileMenuOpen(true)}
+            onOpenSettings={() => setSettingsDrawerOpen(true)}
+            uploadedFileName={uploadedFileName}
+            activeRowsCount={activeRowsCount}
+            onLoadDemo={handleLoadDemo}
+            onReset={handleReset}
+          />
 
-            {uploadedFileName && (
-              <button
-                onClick={handleReset}
-                title="Reset Dữ Liệu"
-                className="p-1 px-2.5 bg-[#ffebee] hover:bg-red-200 text-red-800 border-2 border-[#141414] shadow-[2px_2px_0px_#141414] hover:translate-y-[-1px] hover:shadow-[3px_3px_0px_#141414] active:translate-y-0 transition cursor-pointer font-bold"
-              >
-                <Trash2 size={15} />
-              </button>
-            )}
-          </div>
-        </div>
-      </header>
-
-      {/* --- DASHBOARD WRAPPER CONTAINER --- */}
-      <div className="max-w-7xl mx-auto w-full px-6 py-8 flex-1 grid grid-cols-1 lg:grid-cols-4 gap-8">
-
-        {/* --- LEFT SIDEBAR: ALGORITHM CONFIGURATIONS --- */}
-        <aside className="lg:col-span-1 space-y-6">
-          <div className="bg-white border-2 border-[#141414] p-5 shadow-[4px_4px_0px_#141414] space-y-6">
-            <h2 className="text-xs font-black text-black tracking-widest uppercase flex items-center gap-2 border-b-2 border-[#141414] pb-3">
-              <Settings size={16} className="text-[#141414]" />
-              <span>Tham Số Thuật Toán</span>
-            </h2>
-
-            {/* Single Threshold Slider */}
-            <div className="space-y-4">
-              <div>
-                <label className="text-xs font-black text-[#141414] uppercase tracking-wider flex justify-between mb-1.5">
-                  <span className="flex items-center gap-1.5">
-                    <span className="w-2.5 h-2.5 bg-[#00ff00] border border-[#141414] inline-block"></span>
-                    Độ khớp yêu cầu
-                  </span>
-                  <span className="text-black font-mono font-bold">{config.autoThreshold}%</span>
-                </label>
-                <input
-                  type="range"
-                  min="1"
-                  max="100"
-                  value={config.autoThreshold}
-                  onChange={(e) => setConfig({ ...config, autoThreshold: parseInt(e.target.value), checkThreshold: parseInt(e.target.value) })}
-                  className="w-full h-3 bg-[#f0f0ed] border-2 border-[#141414] appearance-none cursor-pointer accent-[#00ff00]"
-                />
-                <div className="text-[10px] text-[#666] font-medium mt-1.5 leading-relaxed space-y-1">
-                  <p>💥 Dưới <span className="font-extrabold text-[#141414]">{config.autoThreshold}%</span>: <span className="text-red-600 font-bold">Tự động thêm mã mới</span></p>
-                  <p>✅ Từ <span className="font-extrabold text-[#141414]">{config.autoThreshold}% trở lên</span>: <span className="text-green-600 font-bold">Tự rà soát rảnh tay gắn mã cũ</span></p>
-                </div>
-              </div>
-            </div>
-
-            <hr className="border-t-2 border-[#141414]" />
-
-            {/* Cấu hình tiêu chí Đơn giá hàng hóa */}
-            <div className="space-y-3 bg-[#fdfdfb] p-3 border-2 border-[#141414]">
-              <div className="flex justify-between items-center">
-                <h3 className="text-xs font-black text-black uppercase tracking-wider flex items-center gap-1.5">
-                  <span>💰</span> Đối chiếu Đơn giá hàng hóa
-                </h3>
-                <label className="inline-flex items-center cursor-pointer gap-1.5">
-                  <input
-                    type="checkbox"
-                    checked={config.enablePriceMatching !== false}
-                    onChange={(e) => setConfig({ ...config, enablePriceMatching: e.target.checked })}
-                    className="w-4 h-4 border-2 border-[#141414] accent-[#00ff00]"
-                  />
-                  <span className="text-[10px] font-black uppercase text-black">Kích hoạt</span>
-                </label>
-              </div>
-
-              {config.enablePriceMatching !== false && (
-                <div className="space-y-3 text-xs pt-2 border-t border-[#141414]/20">
-                  <div className="flex items-center justify-between gap-2">
-                    <label className="text-[10px] uppercase font-black text-[#555]">Cho phép đơn giá suy ra (Thành tiền / SL)</label>
-                    <input
-                      type="checkbox"
-                      checked={config.allowDerivedPrice !== false}
-                      onChange={(e) => setConfig({ ...config, allowDerivedPrice: e.target.checked })}
-                      className="w-4 h-4 border-2 border-[#141414] accent-[#00ff00]"
-                    />
-                  </div>
-
-                  {/* Thanh kéo duy nhất: ĐỘ KHỚP ĐƠN GIÁ TỐI THIỂU */}
-                  <div className="space-y-2 pt-2 border-t border-slate-200">
-                    <div className="flex justify-between items-center">
-                      <label className="text-[10px] uppercase font-black text-[#141414] tracking-wider">
-                        ĐỘ KHỚP ĐƠN GIÁ TỐI THIỂU
-                      </label>
-                      <span className="font-mono text-xs font-black bg-[#141414] text-[#00ff00] px-2 py-0.5 border border-black shadow-[1px_1px_0px_#141414]">
-                        {config.priceMatchThreshold ?? 90}%
-                      </span>
-                    </div>
-
-                    <div className="flex items-center gap-2 text-[10px] font-mono text-slate-500 font-bold">
-                      <span>0%</span>
-                      <input
-                        type="range"
-                        min="0"
-                        max="100"
-                        step="1"
-                        value={config.priceMatchThreshold ?? 90}
-                        onChange={(e) => setConfig({ ...config, priceMatchThreshold: parseInt(e.target.value) || 0 })}
-                        className="w-full h-2.5 bg-[#e5e5e0] border-2 border-[#141414] appearance-none cursor-pointer accent-[#00ff00]"
-                      />
-                      <span>100%</span>
-                    </div>
-
-                    <div className="bg-[#f0f0ed] p-2 border border-slate-300 text-[11px] text-slate-800 font-medium">
-                      Đơn giá đạt từ <span className="text-black font-extrabold underline">{config.priceMatchThreshold ?? 90}%</span> trở lên sẽ được tính là khớp.
-                    </div>
-                  </div>
-                </div>
-              )}
-            </div>
-
-            <hr className="border-t-2 border-[#141414]" />
-
-            {/* Code prefixes */}
-            <div className="space-y-3">
-              <h3 className="text-xs font-black text-black uppercase tracking-wider">Quy tắc tiền tố sinh mã</h3>
-
-              <div className="grid grid-cols-2 gap-2">
-                <div>
-                  <label className="text-[10px] uppercase font-black text-[#666] tracking-wider">Hàng hóa</label>
-                  <input
-                    type="text"
-                    value={config.prefixHH}
-                    onChange={(e) => setConfig({ ...config, prefixHH: e.target.value })}
-                    className="w-full mt-1 border-2 border-[#141414] bg-white p-1.5 px-3 font-mono text-xs text-black focus:bg-[#f0f0ed] focus:outline-none"
-                  />
-                </div>
-                <div>
-                  <label className="text-[10px] uppercase font-black text-[#666] tracking-wider">Khách mua</label>
-                  <input
-                    type="text"
-                    value={config.prefixKH}
-                    onChange={(e) => setConfig({ ...config, prefixKH: e.target.value })}
-                    className="w-full mt-1 border-2 border-[#141414] bg-white p-1.5 px-3 font-mono text-xs text-black focus:bg-[#f0f0ed] focus:outline-none"
-                  />
-                </div>
-                <div className="col-span-2">
-                  <label className="text-[10px] uppercase font-black text-[#666] tracking-wider">Nhà cung cấp</label>
-                  <input
-                    type="text"
-                    value={config.prefixNCC}
-                    onChange={(e) => setConfig({ ...config, prefixNCC: e.target.value })}
-                    className="w-full mt-1 border-2 border-[#141414] bg-white p-1.5 px-3 font-mono text-xs text-black focus:bg-[#f0f0ed] focus:outline-none"
-                  />
-                </div>
-              </div>
-            </div>
-          </div>
-
-          {/* Quick Stats on directories */}
-          <div className="bg-white border-2 border-[#141414] p-5 shadow-[4px_4px_0px_#141414] space-y-4">
-            <h3 className="text-xs font-black text-black uppercase tracking-wider border-b-2 border-[#141414] pb-2">Cơ sở dữ liệu danh mục</h3>
-
-            {/* Hàng hóa */}
-            <div className="border-2 border-[#141414] bg-[#fdfdfb] p-3 space-y-2.5 shadow-[2px_2px_0px_#141414]">
-              <div className="flex justify-between items-center">
-                <div className="flex items-center gap-2">
-                  <div className="bg-[#141414] p-1 text-white border border-[#141414]">
-                    <Database size={13} />
-                  </div>
-                  <div>
-                    <p className="font-black text-black text-left uppercase text-[10px] tracking-wide">Mã Hàng hóa</p>
-                    <p className="text-slate-500 text-[9px] text-left uppercase font-bold">Vật tư chuẩn trong kho</p>
-                  </div>
-                </div>
-                <span className="font-mono text-[10px] font-black text-black bg-[#00ff00] px-1.5 py-0.5 border border-[#141414]">
-                  {commodities.length} mã
-                </span>
-              </div>
-              <label className="w-full bg-[#141414] text-white hover:bg-[#222] hover:shadow-[3px_3px_0px_#00ff00] active:translate-y-0.5 text-[9px] font-black uppercase py-1.5 px-2 border border-[#141414] transition flex items-center justify-center gap-1.5 cursor-pointer">
-                <Upload size={10} className="text-[#00ff00]" />
-                Nhập danh mục hàng hóa (.XLSX)
-                <input
-                  type="file"
-                  accept=".xlsx,.xls,.csv"
-                  className="hidden"
-                  onChange={(e) => handleImportMasterDirectory(e, "commodity")}
-                />
-              </label>
-            </div>
-
-            {/* Khách hàng */}
-            <div className="border-2 border-[#141414] bg-[#fdfdfb] p-3 space-y-2.5 shadow-[2px_2px_0px_#141414]">
-              <div className="flex justify-between items-center">
-                <div className="flex items-center gap-2">
-                  <div className="bg-[#141414] p-1 text-white border border-[#141414]">
-                    <Users size={13} />
-                  </div>
-                  <div>
-                    <p className="font-black text-black text-left uppercase text-[10px] tracking-wide">Mã Khách hàng</p>
-                    <p className="text-slate-500 text-[9px] text-left uppercase font-bold">Công nợ khách mua</p>
-                  </div>
-                </div>
-                <span className="font-mono text-[10px] font-black text-black bg-[#00ff00] px-1.5 py-0.5 border border-[#141414]">
-                  {partners.filter(p => p.loai_doi_tuong === "Khách hàng").length} mã
-                </span>
-              </div>
-              <label className="w-full bg-[#141414] text-white hover:bg-[#222] hover:shadow-[3px_3px_0px_#00ff00] active:translate-y-0.5 text-[9px] font-black uppercase py-1.5 px-2 border border-[#141414] transition flex items-center justify-center gap-1.5 cursor-pointer">
-                <Upload size={10} className="text-[#00ff00]" />
-                Nhập danh mục khách hàng (.XLSX)
-                <input
-                  type="file"
-                  accept=".xlsx,.xls,.csv"
-                  className="hidden"
-                  onChange={(e) => handleImportMasterDirectory(e, "customer")}
-                />
-              </label>
-            </div>
-
-            {/* Nhà cung cấp */}
-            <div className="border-2 border-[#141414] bg-[#fdfdfb] p-3 space-y-2.5 shadow-[2px_2px_0px_#141414]">
-              <div className="flex justify-between items-center">
-                <div className="flex items-center gap-2">
-                  <div className="bg-[#141414] p-1 text-white border border-[#141414]">
-                    <Users size={13} />
-                  </div>
-                  <div>
-                    <p className="font-black text-black text-left uppercase text-[10px] tracking-wide">Mã Nhà cung cấp</p>
-                    <p className="text-slate-500 text-[9px] text-left uppercase font-bold">Công nợ nhà cung ứng</p>
-                  </div>
-                </div>
-                <span className="font-mono text-[10px] font-black text-black bg-[#00ff00] px-1.5 py-0.5 border border-[#141414]">
-                  {partners.filter(p => p.loai_doi_tuong === "Nhà cung cấp").length} mã
-                </span>
-              </div>
-              <label className="w-full bg-[#141414] text-white hover:bg-[#222] hover:shadow-[3px_3px_0px_#00ff00] active:translate-y-0.5 text-[9px] font-black uppercase py-1.5 px-2 border border-[#141414] transition flex items-center justify-center gap-1.5 cursor-pointer">
-                <Upload size={10} className="text-[#00ff00]" />
-                Nhập danh mục nhà cung cấp (.XLSX)
-                <input
-                  type="file"
-                  accept=".xlsx,.xls,.csv"
-                  className="hidden"
-                  onChange={(e) => handleImportMasterDirectory(e, "supplier")}
-                />
-              </label>
-            </div>
-          </div>
-        </aside>
-
-        {/* --- RIGHT PANEL: DETAILED WORKSPACE & TAB INTERACTIVE SYSTEM --- */}
-        <main className="lg:col-span-3 space-y-6 flex flex-col">
-
-          {/* Nav pills */}
-          <div className="flex flex-wrap gap-2 border-b-2 border-[#141414] pb-3">
-            <button
-              onClick={() => setCurrentTab("dashboard")}
-              className={`px-4 py-2 text-[11px] font-black uppercase tracking-wider transition flex items-center gap-2.5 cursor-pointer ${
-                currentTab === "dashboard"
-                  ? "bg-[#141414] text-white border-2 border-transparent shadow-[4px_4px_0px_#ccc]"
-                  : "bg-white text-black border-2 border-[#141414] shadow-[2px_2px_0px_#141414] hover:bg-[#f0f0ed]"
-              }`}
-            >
-              <span className={`w-2 h-2 border border-black inline-block ${currentTab === "dashboard" ? "bg-[#00ff00]" : "bg-white"}`}></span>
-              📊 Dashboard
-            </button>
-            <button
-              onClick={() => setCurrentTab("commodity")}
-              className={`px-4 py-2 text-[11px] font-black uppercase tracking-wider transition flex items-center gap-2.5 cursor-pointer ${
-                currentTab === "commodity"
-                  ? "bg-[#141414] text-white border-2 border-transparent shadow-[4px_4px_0px_#ccc]"
-                  : "bg-white text-black border-2 border-[#141414] shadow-[2px_2px_0px_#141414] hover:bg-[#f0f0ed]"
-              }`}
-            >
-              <span className={`w-2 h-2 border border-black inline-block ${currentTab === "commodity" ? "bg-[#00ff00]" : "bg-white"}`}></span>
-              📦 Gán mã Hàng Hóa
-            </button>
-            <button
-              onClick={() => setCurrentTab("partner")}
-              className={`px-4 py-2 text-[11px] font-black uppercase tracking-wider transition flex items-center gap-2.5 cursor-pointer ${
-                currentTab === "partner"
-                  ? "bg-[#141414] text-white border-2 border-transparent shadow-[4px_4px_0px_#ccc]"
-                  : "bg-white text-black border-2 border-[#141414] shadow-[2px_2px_0px_#141414] hover:bg-[#f0f0ed]"
-              }`}
-            >
-              <span className={`w-2 h-2 border border-black inline-block ${currentTab === "partner" ? "bg-[#00ff00]" : "bg-white"}`}></span>
-              👥 Gán mã Đối Tác
-            </button>
-            <button
-              onClick={() => setCurrentTab("bank")}
-              className={`px-4 py-2 text-[11px] font-black uppercase tracking-wider transition flex items-center gap-2.5 cursor-pointer ${
-                currentTab === "bank"
-                  ? "bg-[#141414] text-white border-2 border-transparent shadow-[4px_4px_0px_#ccc]"
-                  : "bg-white text-black border-2 border-[#141414] shadow-[2px_2px_0px_#141414] hover:bg-[#f0f0ed]"
-              }`}
-            >
-              <span className={`w-2 h-2 border border-black inline-block ${currentTab === "bank" ? "bg-[#00ff00]" : "bg-white"}`}></span>
-              🏦 Giao Dịch Sao Kê
-            </button>
-            <button
-              onClick={() => setCurrentTab("integrated")}
-              className={`px-4 py-2 text-[11px] font-black uppercase tracking-wider transition flex items-center gap-2.5 cursor-pointer ${
-                currentTab === "integrated"
-                  ? "bg-[#141414] text-white border-2 border-transparent shadow-[4px_4px_0px_#ccc]"
-                  : "bg-white text-black border-2 border-[#141414] shadow-[2px_2px_0px_#141414] hover:bg-[#f0f0ed]"
-              }`}
-            >
-              <span className={`w-2 h-2 border border-black inline-block ${currentTab === "integrated" ? "bg-[#00ff00]" : "bg-white"}`}></span>
-              🧩 Đa phân hệ chéo
-            </button>
-            <button
-              onClick={() => setCurrentTab("ecommerce")}
-              className={`px-4 py-2 text-[11px] font-black uppercase tracking-wider transition flex items-center gap-2.5 cursor-pointer ${
-                currentTab === "ecommerce"
-                  ? "bg-[#141414] text-white border-2 border-transparent shadow-[4px_4px_0px_#00ff00]"
-                  : "bg-white text-black border-2 border-[#141414] shadow-[2px_2px_0px_#141414] hover:bg-[#f0f0ed]"
-              }`}
-            >
-              <span className={`w-2 h-2 border border-black inline-block ${currentTab === "ecommerce" ? "bg-[#00ff00]" : "bg-white"}`}></span>
-              🛒 Doanh Thu Sàn TMĐT
-            </button>
-            <button
-              onClick={() => setCurrentTab("python")}
-              className={`px-4 py-2 text-[11px] font-black uppercase tracking-wider transition flex items-center gap-2.5 cursor-pointer ${
-                currentTab === "python"
-                  ? "bg-[#141414] text-white border-2 border-transparent shadow-[4px_4px_0px_#ccc]"
-                  : "bg-white text-black border-2 border-[#141414] shadow-[2px_2px_0px_#141414] hover:bg-[#f0f0ed]"
-              }`}
-            >
-              <span className={`w-2 h-2 border border-black inline-block ${currentTab === "python" ? "bg-[#00ff00]" : "bg-white"}`}></span>
-              🐍 Local Python App
-            </button>
-          </div>
+          {/* Main Workspace */}
+          <main className="p-4 sm:p-6 lg:p-8 flex-1 max-w-[1600px] w-full mx-auto space-y-6">
 
           {/* --- TAB CONTENT 1: WELCOME & SUMMARY --- */}
           {currentTab === "dashboard" && (
@@ -4280,6 +3964,17 @@ export default function App() {
             <EcommerceReconciliationView />
           )}
 
+          {/* --- TAB CONTENT: SETTINGS & MASTER DIRECTORIES --- */}
+          {currentTab === "settings" && (
+            <AlgorithmSettingsView
+              config={config}
+              setConfig={setConfig}
+              commodities={commodities}
+              partners={partners}
+              handleImportMasterDirectory={handleImportMasterDirectory}
+            />
+          )}
+
           {/* --- TAB CONTENT 6: PYTHON SOURCE CODE VIEWER --- */}
           {currentTab === "python" && (
             <div className="space-y-6 animate-fade-in">
@@ -4318,16 +4013,42 @@ unidecode>=1.3.8`}
             </div>
           )}
 
-        </main>
+          </main>
+
+          {/* Modern Dashboard Footer */}
+          <footer className="bg-white border-t-2 border-[#141414] py-6 px-6 text-center text-xs text-slate-600 mt-auto">
+            <div className="max-w-7xl mx-auto space-y-1">
+              <p className="font-black uppercase tracking-wider text-[11px] text-black">
+                SmartLedger AutoCoder • Hệ thống tự động kế toán &amp; đối chiếu dữ liệu nội bộ
+              </p>
+              <p className="text-slate-500 font-bold uppercase text-[9px]">
+                Xử lý định danh cục bộ (In-Browser Computation) • Bảo mật 100% dữ liệu doanh nghiệp
+              </p>
+            </div>
+          </footer>
+        </div>
       </div>
 
-      {/* --- FOOTER REGION --- */}
-      <footer className="bg-[#f0f0ed] border-t-2 border-[#141414] text-black py-8 text-center text-xs mt-12">
-        <div className="max-w-7xl mx-auto px-6">
-          <p className="font-black uppercase tracking-wider text-[11px]">Auto-Accounting Mapper • Thiết bị nghiệp vụ Kế Toán Kho và Công Nợ</p>
-          <p className="text-slate-500 font-bold uppercase text-[9px] mt-1.5">Sử dụng thuật toán so khớp khoảng cách mờ chuỗi ký tự tiếng Việt chuẩn hóa • Bảo mật cục bộ 100%</p>
+      {/* Slide-over Drawer for Quick Settings from anywhere */}
+      {settingsDrawerOpen && (
+        <div className="fixed inset-0 bg-black/60 z-50 flex justify-end backdrop-blur-xs animate-fade-in">
+          <div
+            className="fixed inset-0"
+            onClick={() => setSettingsDrawerOpen(false)}
+          />
+          <div className="relative w-full max-w-2xl bg-[#fdfdfb] border-l-4 border-black h-full overflow-y-auto shadow-2xl z-10">
+            <AlgorithmSettingsView
+              config={config}
+              setConfig={setConfig}
+              commodities={commodities}
+              partners={partners}
+              handleImportMasterDirectory={handleImportMasterDirectory}
+              isDrawer={true}
+              onCloseDrawer={() => setSettingsDrawerOpen(false)}
+            />
+          </div>
         </div>
-      </footer>
+      )}
 
       {/* --- TOP 3 COMMODITY CANDIDATES MODAL OVERLAY --- */}
       {selectedCommodityDetailRow && (
