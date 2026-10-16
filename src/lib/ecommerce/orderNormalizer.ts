@@ -19,10 +19,12 @@ export function normalizeOrderId(val: any): { original: string; normalized: stri
 
   let str = String(val);
 
-  // Xử lý các dạng scientific notation nếu lỡ bị chuyển từ floating point Excel
+  // Loại bỏ dấu nháy đơn ' thường được kế toán thêm vào đầu ô Excel để ép kiểu Text
+  str = str.replace(/^['"`]+|['"`]+$/g, "");
+
+  // Xử lý các dạng scientific notation nếu lỡ bị chuyển từ floating point Excel (ví dụ 2.607E+14)
   if (/^\s*[+-]?\d+(\.\d+)?[eE][+-]?\d+\s*$/.test(str)) {
     try {
-      // BigInt hoặc format cẩn thận nếu là số nguyên lớn
       const num = Number(str);
       if (!isNaN(num) && Number.isSafeInteger(num)) {
         str = BigInt(Math.round(num)).toString();
@@ -30,6 +32,11 @@ export function normalizeOrderId(val: any): { original: string; normalized: stri
     } catch {
       // fallback giữ nguyên str
     }
+  }
+
+  // Loại bỏ đuôi .0 nếu Excel vô tình lưu mã đơn số nguyên thành số thực float (ví dụ 26070112345.0)
+  if (/^\d+\.0$/.test(str.trim())) {
+    str = str.trim().replace(/\.0$/, "");
   }
 
   const original = str.trim();

@@ -45,14 +45,32 @@ export function reconcileEcommerceRevenue(
       let status: ReconciliationStatus = "KHỚP";
       let note = "";
 
-      if (mOrder.voucherInconsistent || sOrder.isAmbiguous) {
+      // Kiểm tra trạng thái trả hàng/hoàn tiền
+      if (
+        mOrder.returnRefundStatus &&
+        (mOrder.returnRefundStatus.toLowerCase().includes("hoàn") ||
+         mOrder.returnRefundStatus.toLowerCase().includes("trả") ||
+         mOrder.returnRefundStatus.toLowerCase().includes("refund") ||
+         mOrder.returnRefundStatus.toLowerCase().includes("return"))
+      ) {
+        warningFlags.push("Đơn có trạng thái Trả hàng/Hoàn tiền trên sàn");
+      }
+
+      if (mOrder.isCancelled) {
+        // Cảnh báo nghiêm trọng: Đơn đã hủy trên sàn nhưng PM vẫn xuất hóa đơn / ghi nhận tiền
+        status = "CẦN KIỂM TRA";
+        note = `CẢNH BÁO: Đơn đã hủy trên sàn nhưng PM vẫn ghi nhận doanh thu (${sOrder.totalAmount.toLocaleString("vi-VN")}đ)`;
+        warningFlags.push("Đơn đã hủy trên sàn nhưng PM vẫn ghi nhận doanh thu");
+      } else if (mOrder.voucherInconsistent || sOrder.isAmbiguous) {
         status = "CẦN KIỂM TRA";
         note = mOrder.voucherInconsistent
           ? "Dữ liệu mã giảm giá của Shop không nhất quán"
           : "Nhiều chứng từ phần mềm cần kiểm tra";
       } else if (isMatch) {
         status = "KHỚP";
-        note = "Khớp doanh thu";
+        note = Math.abs(diff) > 0
+          ? `Khớp doanh thu (lệch ${diff > 0 ? "+" : ""}${diff}đ trong ngưỡng ${tolerance}đ)`
+          : "Khớp doanh thu";
       } else {
         status = "CHÊNH LỆCH";
         note = diff > 0
@@ -88,6 +106,7 @@ export function reconcileEcommerceRevenue(
         revenueDifference: diff,
         toleranceApplied: tolerance,
         note,
+        periodIssuedAmount: sOrder.totalAmount,
         warningFlags,
         marketplaceData: mOrder,
         salesData: sOrder
@@ -135,6 +154,7 @@ export function reconcileEcommerceRevenue(
         revenueDifference: mOrder.calculatedRevenue,
         toleranceApplied: tolerance,
         note,
+        periodIssuedAmount: 0,
         warningFlags,
         marketplaceData: mOrder
       });
@@ -187,6 +207,7 @@ export function reconcileEcommerceRevenue(
       revenueDifference: -sOrder.totalAmount,
       toleranceApplied: tolerance,
       note,
+      periodIssuedAmount: sOrder.totalAmount,
       warningFlags,
       salesData: sOrder
     });

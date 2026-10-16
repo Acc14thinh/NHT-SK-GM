@@ -33,22 +33,48 @@ export interface ParsedMarketplaceResult {
 }
 
 /**
- * Tìm kiếm header khớp nhất theo danh sách từ khóa
+ * Tìm kiếm header khớp nhất theo nguyên tắc:
+ * 1. Exact case-sensitive match (ưu tiên cao nhất)
+ * 2. Case-insensitive exact match (nếu chỉ có duy nhất 1 cột)
+ * 3. Không tự ý fuzzy match nếu có nhiều cột có tên tương tự sau chuẩn hóa (đặc biệt: "Tổng số tiền Người mua thanh toán" vs "Tổng số tiền người mua thanh toán")
  */
-export function findBestMatchingHeader(headers: string[], keywords: string[]): string {
-  const normKeywords = keywords.map(k => k.toLowerCase().trim());
+export function findStrictMatchingHeader(
+  headers: string[],
+  exactCaseKeywords: string[],
+  fallbackKeywords: string[] = []
+): string {
+  if (!headers || headers.length === 0) return "";
 
-  // 1. Exact match
-  for (const h of headers) {
-    const normH = String(h || "").toLowerCase().trim();
-    if (normKeywords.includes(normH)) return h;
+  // 1. Kiểm tra Exact match có phân biệt HOA/thường (Case-sensitive)
+  for (const target of exactCaseKeywords) {
+    if (headers.includes(target)) {
+      return target;
+    }
   }
 
-  // 2. Contains match
-  for (const kw of normKeywords) {
-    for (const h of headers) {
-      const normH = String(h || "").toLowerCase().trim();
-      if (normH.includes(kw)) return h;
+  // 2. Kiểm tra Exact match không phân biệt hoa thường (Case-insensitive)
+  // CHÚ Ý: Nếu có >= 2 cột trong headers cùng khớp khi toLowerCase(), KHÔNG tự chọn bừa!
+  for (const target of exactCaseKeywords.concat(fallbackKeywords)) {
+    const normTarget = target.toLowerCase().trim();
+    const candidateMatches = headers.filter(h => String(h || "").toLowerCase().trim() === normTarget);
+
+    if (candidateMatches.length === 1) {
+      return candidateMatches[0];
+    } else if (candidateMatches.length > 1) {
+      // Có nhiều cột bị trùng sau normalize -> Tìm cột có case-match gần nhất
+      const exactCase = candidateMatches.find(h => h.trim() === target.trim());
+      if (exactCase) return exactCase;
+      // Nếu không có cột nào khớp case chuẩn, để người dùng tự chọn qua dropdown để tránh nhầm lẫn
+      return "";
+    }
+  }
+
+  // 3. Fallback: Contains match nếu danh sách dự phòng có
+  for (const kw of fallbackKeywords) {
+    const normKw = kw.toLowerCase().trim();
+    const matches = headers.filter(h => String(h || "").toLowerCase().includes(normKw));
+    if (matches.length === 1) {
+      return matches[0];
     }
   }
 
@@ -56,43 +82,98 @@ export function findBestMatchingHeader(headers: string[], keywords: string[]): s
 }
 
 /**
- * Tự động nhận diện cấu hình cột cho file Sàn Shopee (Ưu tiên mapping đã lưu trước đó)
+ * Backward compatibility alias
+ */
+export function findBestMatchingHeader(headers: string[], keywords: string[]): string {
+  return findStrictMatchingHeader(headers, keywords, []);
+}
+
+/**
+ * Kiểm tra xem cột có phải được nhận diện chính xác theo chuẩn Shopee không
+ */
+export function isExactShopeeHeader(field: keyof MarketplaceColumnMapping, header: string): boolean {
+  if (!header) return false;
+  const hTrim = header.trim();
+  const hLower = hTrim.toLowerCase();
+
+  switch (field) {
+    case "orderIdCol":
+      return hLower === "mã đơn hàng" || hLower === "ma don hang" || hLower === "mã đơn";
+    case "orderStatusCol":
+      return hLower === "trạng thái đơn hàng" || hLower === "trang thai don hang";
+    case "deliveryTimeCol":
+      return hLower === "thời gian giao hàng" || hLower === "thoi gian giao hang";
+    case "returnRefundCol":
+      return hLower === "trạng thái trả hàng/hoàn tiền" || hLower === "trang thai tra hang/hoan tien";
+    case "buyerPaidCol":
+      // Cực kỳ quan trọng: CHÍNH XÁC "Tổng số tiền Người mua thanh toán" (Chữ N hoa)
+      return hTrim === "Tổng số tiền Người mua thanh toán";
+    case "shopVoucherCol":
+      return hLower === "mã giảm giá của shop" || hLower === "ma giam gia cua shop" || hLower === "voucher của shop";
+    default:
+      return false;
+  }
+}
+
+/**
+ * Tự động nhận diện cấu hình cột cho file Sàn Shopee theo đúng logic đối chiếu đã kiểm chứng (Section A)
  */
 export function autoDetectShopeeColumns(headers: string[]): MarketplaceColumnMapping {
   const saved = getSavedHeaderMappings("marketplace");
 
-  const getCol = (savedKey: string, keywords: string[]): string => {
+  const getCol = (savedKey: string, exactKeywords: string[], fallbackKeywords: string[] = []): string => {
     if (saved[savedKey] && headers.includes(saved[savedKey])) {
       return saved[savedKey];
     }
-    return findBestMatchingHeader(headers, keywords);
+    return findStrictMatchingHeader(headers, exactKeywords, fallbackKeywords);
   };
 
   return {
+    // KHÓA ĐỐI CHIẾU: Mã đơn hàng (*)
     orderIdCol: getCol("orderIdCol", [
-      "mã đơn hàng", "ma don hang", "order id", "mã đơn", "order_sn", "ordersn", "số đơn hàng"
+      "Mã đơn hàng", "Mã đơn"
+    ], [
+      "ma don hang", "order id", "order_sn", "ordersn", "số đơn hàng"
     ]),
+
+    // TÍNH DOANH THU: Tổng số tiền Người mua thanh toán (*)
+    // CHÍNH XÁC tới header: "Tổng số tiền Người mua thanh toán" (chữ N hoa). KHÔNG tự map sang "Tổng số tiền người mua thanh toán"
     buyerPaidCol: getCol("buyerPaidCol", [
-      "tổng số tiền người mua thanh toán", "tong so tien nguoi mua thanh toan",
-      "người mua thanh toán", "buyer total", "buyer paid amount", "tiền người mua trả", "tổng giá trị đơn hàng"
-    ]),
+      "Tổng số tiền Người mua thanh toán"
+    ], []),
+
+    // TÍNH DOANH THU: Mã giảm giá của Shop (*)
     shopVoucherCol: getCol("shopVoucherCol", [
-      "mã giảm giá của shop", "ma giam gia cua shop",
-      "voucher của shop", "voucher shop", "shop voucher", "giảm giá của shop"
+      "Mã giảm giá của Shop", "Mã giảm giá của shop"
+    ], [
+      "ma giam gia cua shop", "voucher của shop", "voucher shop", "shop voucher"
     ]),
+
+    // THÔNG TIN TRẠNG THÁI: Trạng thái đơn hàng (*)
     orderStatusCol: getCol("orderStatusCol", [
-      "trạng thái đơn hàng", "trang thai don hang", "trạng thái đơn", "order status"
+      "Trạng Thái Đơn Hàng", "Trạng thái đơn hàng"
+    ], [
+      "trang thai don hang", "order status"
     ]),
+
+    // THÔNG TIN TRẠNG THÁI: Thời gian giao hàng
     deliveryTimeCol: getCol("deliveryTimeCol", [
-      "thời gian giao hàng", "thoi gian giao hang",
-      "thời gian hoàn thành", "ngày giao hàng", "delivery time"
+      "Thời gian giao hàng"
+    ], [
+      "thoi gian giao hang", "thời gian hoàn thành", "ngày giao hàng", "delivery time"
     ]),
+
+    // THÔNG TIN TRẠNG THÁI: Trạng thái Trả hàng/Hoàn tiền (*)
     returnRefundCol: getCol("returnRefundCol", [
-      "trạng thái trả hàng/hoàn tiền", "trang thai tra hang/hoan tien",
-      "trả hàng/hoàn tiền", "return / refund status", "hoàn tiền"
+      "Trạng thái Trả hàng/Hoàn tiền", "Trạng thái trả hàng/hoàn tiền"
+    ], [
+      "trang thai tra hang/hoan tien", "trả hàng/hoàn tiền", "return / refund status", "hoàn tiền"
     ]),
+
     skuCol: getCol("skuCol", [
-      "tên sản phẩm", "ten san pham", "sku", "mã sản phẩm", "product name"
+      "Tên sản phẩm", "SKU"
+    ], [
+      "ten san pham", "mã sản phẩm", "product name"
     ])
   };
 }
@@ -135,8 +216,13 @@ export function parseMarketplaceWorkbook(
       if (
         rowStr.includes("mã đơn hàng") ||
         rowStr.includes("ma don hang") ||
+        rowStr.includes("mã đơn") ||
         rowStr.includes("order id") ||
-        rowStr.includes("người mua thanh toán")
+        rowStr.includes("order_sn") ||
+        rowStr.includes("ordersn") ||
+        rowStr.includes("người mua thanh toán") ||
+        rowStr.includes("buyer paid") ||
+        rowStr.includes("tổng số tiền")
       ) {
         headerRowIdx = r;
         break;
@@ -200,6 +286,10 @@ export function parseMarketplaceWorkbook(
       }
 
       rows.push(rowObj);
+    }
+
+    if (workbook.SheetNames.length > 1 && rows.length === 0) {
+      continue;
     }
 
     totalRowsAcrossSheets += rows.length;

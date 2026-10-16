@@ -29,15 +29,22 @@ import {
   ReconciliationConfig,
   ReconciliationRecord,
   ReconciliationSummary,
-  ShopMappingEntry
+  ShopMappingEntry,
+  getColumnLetter,
+  MarketplaceColumnMapping,
+  SalesSoftwareColumnMapping
 } from "../../lib/ecommerce/types";
 import {
   parseMarketplaceWorkbook,
-  ParsedMarketplaceResult
+  ParsedMarketplaceResult,
+  autoDetectShopeeColumns,
+  isExactShopeeHeader
 } from "../../lib/ecommerce/shopeeParser";
 import {
   parseSalesSoftwareWorkbook,
-  ParsedSalesSoftwareResult
+  ParsedSalesSoftwareResult,
+  autoDetectSalesSoftwareColumns,
+  isExactSalesHeader
 } from "../../lib/ecommerce/salesSoftwareParser";
 import {
   buildProposedShopMappings,
@@ -64,6 +71,7 @@ export const EcommerceReconciliationView: React.FC = () => {
   // Collapsible Advanced Settings (Mặc định thu gọn theo Section 34)
   const [showAdvancedSettings, setShowAdvancedSettings] = useState<boolean>(false);
   const [showColumnMappingModal, setShowColumnMappingModal] = useState<boolean>(false);
+  const [mappingModalTab, setMappingModalTab] = useState<"shopee" | "sales">("shopee");
   const [showShopMappingModal, setShowShopMappingModal] = useState<boolean>(false);
 
   // Files & Parsed data
@@ -94,6 +102,191 @@ export const EcommerceReconciliationView: React.FC = () => {
     setTimeout(() => setToastMessage(null), 3500);
   };
 
+  // Xem trước giá trị mẫu 3-5 dòng cho cột được chọn trong file Shopee
+  const getShopeePreviewValues = (colName: string): string[] => {
+    if (!colName || !marketplaceResult?.sheets[0]?.rows) return [];
+    const vals: string[] = [];
+    for (const r of marketplaceResult.sheets[0].rows) {
+      const v = r[colName];
+      if (v !== undefined && v !== null && String(v).trim() !== "") {
+        vals.push(String(v));
+        if (vals.length >= 4) break;
+      }
+    }
+    return vals;
+  };
+
+  // Xem trước giá trị mẫu 3-5 dòng cho cột được chọn trong file Phần Mềm Bán Hàng
+  const getSalesPreviewValues = (colName: string): string[] => {
+    if (!colName || !salesResult?.rows) return [];
+    const vals: string[] = [];
+    for (const r of salesResult.rows) {
+      const v = r[colName];
+      if (v !== undefined && v !== null && String(v).trim() !== "") {
+        vals.push(String(v));
+        if (vals.length >= 4) break;
+      }
+    }
+    return vals;
+  };
+
+  // Cập nhật trường mapping cho file Shopee (đồng bộ trên tất cả các sheet trong workbook)
+  const handleUpdateShopeeMapping = (field: keyof MarketplaceColumnMapping, val: string) => {
+    if (!marketplaceResult) return;
+    const updated = { ...marketplaceResult };
+    updated.sheets = updated.sheets.map(s => ({
+      ...s,
+      detectedMapping: {
+        ...s.detectedMapping,
+        [field]: val
+      }
+    }));
+    setMarketplaceResult(updated);
+    saveHeaderMappings("marketplace", { [field]: val });
+  };
+
+  // Cập nhật trường mapping cho file Phần mềm bán hàng
+  const handleUpdateSalesMapping = (field: keyof SalesSoftwareColumnMapping, val: string) => {
+    if (!salesResult) return;
+    const updated = {
+      ...salesResult,
+      detectedMapping: {
+        ...salesResult.detectedMapping,
+        [field]: val
+      }
+    };
+    setSalesResult(updated);
+    saveHeaderMappings("sales", { [field]: val });
+  };
+
+  // Tự động nhận diện lại toàn bộ các cột từ headers thực tế
+  const handleResetAutoDetection = () => {
+    if (marketplaceResult && marketplaceResult.sheets.length > 0) {
+      const updated = { ...marketplaceResult };
+      updated.sheets = updated.sheets.map(s => ({
+        ...s,
+        detectedMapping: autoDetectShopeeColumns(s.headers)
+      }));
+      setMarketplaceResult(updated);
+    }
+    if (salesResult) {
+      setSalesResult({
+        ...salesResult,
+        detectedMapping: autoDetectSalesSoftwareColumns(salesResult.headers)
+      });
+    }
+    showToast("Đã tự động nhận diện lại cấu hình cột từ các file!", "info");
+  };
+
+  // Helper lấy ký tự cột + tên cột cho Shopee
+  const getShopeeColLetterAndName = (colName?: string) => {
+    if (!colName || !marketplaceResult?.sheets[0]?.headers) return "";
+    const idx = marketplaceResult.sheets[0].headers.indexOf(colName);
+    return idx >= 0 ? `${getColumnLetter(idx)} — ${colName}` : colName;
+  };
+
+  // Helper lấy ký tự cột + tên cột cho Sales
+  const getSalesColLetterAndName = (colName?: string) => {
+    if (!colName || !salesResult?.headers) return "";
+    const idx = salesResult.headers.indexOf(colName);
+    return idx >= 0 ? `${getColumnLetter(idx)} — ${colName}` : colName;
+  };
+
+  // Trạng thái kiểm tra 6 cột File Sàn Shopee (Section 1, 3, 4)
+  const shopeeChecks = useMemo(() => {
+    if (!marketplaceResult || !marketplaceResult.sheets[0]) return null;
+    const m = marketplaceResult.sheets[0].detectedMapping;
+    const items = [
+      {
+        key: "orderIdCol",
+        label: "Mã đơn hàng",
+        header: m.orderIdCol,
+        isMapped: Boolean(m.orderIdCol)
+      },
+      {
+        key: "orderStatusCol",
+        label: "Trạng thái đơn",
+        header: m.orderStatusCol,
+        isMapped: Boolean(m.orderStatusCol)
+      },
+      {
+        key: "returnRefundCol",
+        label: "Trạng thái Trả hàng/Hoàn tiền",
+        header: m.returnRefundCol,
+        isMapped: Boolean(m.returnRefundCol)
+      },
+      {
+        key: "deliveryTimeCol",
+        label: "Thời gian giao hàng",
+        header: m.deliveryTimeCol,
+        isMapped: Boolean(m.deliveryTimeCol)
+      },
+      {
+        key: "buyerPaidCol",
+        label: "Tổng tiền người mua thanh toán",
+        header: m.buyerPaidCol,
+        isMapped: Boolean(m.buyerPaidCol),
+        isExact: m.buyerPaidCol === "Tổng số tiền Người mua thanh toán"
+      },
+      {
+        key: "shopVoucherCol",
+        label: "Mã giảm giá Shop",
+        header: m.shopVoucherCol,
+        isMapped: Boolean(m.shopVoucherCol)
+      }
+    ];
+    const mappedCount = items.filter(i => i.isMapped).length;
+    // Kiểm tra riêng cột tiền có bị không chắc chắn không (Section 4)
+    const hasUncertainBuyerPaid = !m.buyerPaidCol || m.buyerPaidCol !== "Tổng số tiền Người mua thanh toán";
+    return { items, mappedCount, total: 6, hasUncertainBuyerPaid };
+  }, [marketplaceResult]);
+
+  // Trạng thái kiểm tra 6 cột File Phần Mềm Bán Hàng (Section 1, 5)
+  const salesChecks = useMemo(() => {
+    if (!salesResult) return null;
+    const m = salesResult.detectedMapping;
+    const items = [
+      {
+        key: "shopNameCol",
+        label: "Tên Shop",
+        header: m.shopNameCol,
+        isMapped: Boolean(m.shopNameCol)
+      },
+      {
+        key: "orderIdCol",
+        label: "Mã đơn từ sàn",
+        header: m.orderIdCol,
+        isMapped: Boolean(m.orderIdCol)
+      },
+      {
+        key: "invoiceNumberCol",
+        label: "Số hóa đơn",
+        header: m.invoiceNumberCol,
+        isMapped: Boolean(m.invoiceNumberCol)
+      },
+      {
+        key: "invoiceDateCol",
+        label: "Ngày hạch toán",
+        header: m.invoiceDateCol,
+        isMapped: Boolean(m.invoiceDateCol)
+      },
+      {
+        key: "totalAmountCol",
+        label: "Tổng tiền thanh toán",
+        header: m.totalAmountCol,
+        isMapped: Boolean(m.totalAmountCol)
+      },
+      {
+        key: "voucherNumberCol",
+        label: "Số chứng từ",
+        header: m.voucherNumberCol || m.invoiceNumberCol,
+        isMapped: Boolean(m.voucherNumberCol || m.invoiceNumberCol)
+      }
+    ];
+    const mappedCount = items.filter(i => i.isMapped).length;
+    return { items, mappedCount, total: 6 };
+  }, [salesResult]);
+
   // Tự động nhận diện và ghép shop khi có đủ 2 nguồn (Section 32, 35)
   useEffect(() => {
     if (marketplaceResult && salesResult) {
@@ -111,44 +304,54 @@ export const EcommerceReconciliationView: React.FC = () => {
       return { isReady: false, blockingError: null, warningText: null };
     }
 
-    // 1. Kiểm tra cột Mã đơn hàng trên file sàn
-    const mMissingOrderId = marketplaceResult.sheets.some(s => !s.detectedMapping.orderIdCol);
-    if (mMissingOrderId) {
+    // 1. Kiểm tra các cột bắt buộc trên file Shopee
+    const shopeeMapping = marketplaceResult.sheets[0]?.detectedMapping;
+    if (!shopeeMapping?.orderIdCol) {
       return {
         isReady: false,
-        blockingError: "Không tìm thấy cột [Mã đơn hàng] trong file Shopee.",
+        blockingError: "Chưa cấu hình cột [Mã đơn hàng] trong file Shopee.",
+        actionType: "column_mkt" as const
+      };
+    }
+    if (!shopeeMapping?.buyerPaidCol) {
+      return {
+        isReady: false,
+        blockingError: "Chưa cấu hình cột [Tổng số tiền Người mua thanh toán] trong file Shopee.",
+        actionType: "column_mkt" as const
+      };
+    }
+    if (!shopeeMapping?.returnRefundCol) {
+      return {
+        isReady: false,
+        blockingError: "Chưa cấu hình cột [Trạng thái Trả hàng/Hoàn tiền] trong file Shopee.",
         actionType: "column_mkt" as const
       };
     }
 
-    // 2. Kiểm tra cột Tên Shop trên file phần mềm
+    // 2. Kiểm tra các cột bắt buộc trên file Phần mềm bán hàng
     if (!salesResult.detectedMapping.shopNameCol) {
       return {
         isReady: false,
-        blockingError: "Không tìm thấy cột [Tên Shop] trong file phần mềm bán hàng.",
+        blockingError: "Chưa cấu hình cột [Tên Shop] trong file phần mềm bán hàng.",
         actionType: "column_sales" as const
       };
     }
-
-    // 3. Kiểm tra cột Mã đơn trên file phần mềm
     if (!salesResult.detectedMapping.orderIdCol) {
       return {
         isReady: false,
-        blockingError: "Không tìm thấy cột [Số đơn hàng từ hệ thống khác / Mã đơn] trong file phần mềm.",
+        blockingError: "Chưa cấu hình cột [Mã đơn từ sàn] trong file phần mềm bán hàng.",
         actionType: "column_sales" as const
       };
     }
-
-    // 4. Kiểm tra cột Tổng tiền trên file phần mềm
     if (!salesResult.detectedMapping.totalAmountCol) {
       return {
         isReady: false,
-        blockingError: "Không tìm thấy cột [Tổng tiền / Thành tiền] trong file phần mềm bán hàng.",
+        blockingError: "Chưa cấu hình cột [Tổng tiền] trong file phần mềm bán hàng.",
         actionType: "column_sales" as const
       };
     }
 
-    // 5. Kiểm tra nếu có nhiều shop mà chưa ghép được shop nào
+    // 3. Kiểm tra ghép Shop
     if (
       marketplaceResult.sheets.length > 1 &&
       shopMappings.length > 0 &&
@@ -481,6 +684,92 @@ export const EcommerceReconciliationView: React.FC = () => {
                 </div>
               )}
             </div>
+
+            {/* BLOCK TÓM TẮT TỐI GIẢN: KHỚP CỘT EXCEL – DỮ LIỆU SÀN (Section 1, 3, 4) */}
+            {marketplaceResult && shopeeChecks && (
+              <div className="border-2 border-black bg-white p-3 space-y-2.5 shadow-[2px_2px_0px_#141414]">
+                <div className="flex items-center justify-between border-b-2 border-black pb-1.5">
+                  <span className="text-[11px] font-black uppercase text-black tracking-wider flex items-center gap-1.5">
+                    <span className="w-2 h-2 bg-[#ee4d2d] inline-block"></span>
+                    KHỚP CỘT EXCEL – DỮ LIỆU SÀN
+                  </span>
+                  <span className={`text-[10px] font-black font-mono px-2 py-0.5 border ${
+                    shopeeChecks.mappedCount === 6
+                      ? "bg-green-100 text-green-800 border-green-300"
+                      : "bg-amber-100 text-amber-800 border-amber-300"
+                  }`}>
+                    Đã nhận diện: {shopeeChecks.mappedCount}/6 cột
+                  </span>
+                </div>
+
+                <div className="space-y-1 text-xs">
+                  {shopeeChecks.items.map((item) => (
+                    <div
+                      key={item.key}
+                      className="flex items-center justify-between py-0.5 px-1 rounded hover:bg-slate-50 text-[11px]"
+                    >
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        {item.isMapped ? (
+                          <span className="text-green-700 font-black">✓</span>
+                        ) : (
+                          <span className="text-red-600 font-black">✕</span>
+                        )}
+                        <span className={`font-bold truncate ${item.isMapped ? "text-slate-800" : "text-red-700 font-black"}`}>
+                          {item.label}
+                        </span>
+                      </div>
+                      {item.header ? (
+                        <span className="text-[10px] text-slate-500 font-mono shrink-0 ml-2">
+                          {getShopeeColLetterAndName(item.header)}
+                        </span>
+                      ) : (
+                        <span className="text-[10px] text-red-600 font-bold shrink-0">Chưa chọn</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {/* Xử lý riêng khi không xác định chắc chắn cột "Tổng tiền người mua thanh toán" (Section 4) */}
+                {shopeeChecks.hasUncertainBuyerPaid && (
+                  <div className="p-2.5 bg-amber-50 border-2 border-amber-400 space-y-1.5 rounded">
+                    <div className="flex items-center gap-1.5 font-black text-amber-900 text-[11px]">
+                      <AlertTriangle size={14} className="text-amber-700 shrink-0" />
+                      <span>Không xác định chắc chắn cột &quot;Tổng tiền người mua thanh toán&quot;</span>
+                    </div>
+                    <p className="text-[11px] text-amber-800 font-medium">Vui lòng chọn:</p>
+                    <select
+                      value={marketplaceResult.sheets[0]?.detectedMapping.buyerPaidCol || ""}
+                      onChange={(e) => handleUpdateShopeeMapping("buyerPaidCol", e.target.value)}
+                      className="w-full border-2 border-black p-2 text-xs font-mono font-bold bg-white cursor-pointer"
+                    >
+                      <option value="">-- Chọn cột tiền người mua thanh toán --</option>
+                      {marketplaceResult.sheets[0]?.headers.map((h, idx) => (
+                        <option key={h} value={h}>
+                          {getColumnLetter(idx)} — {h}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                )}
+
+                <div className="pt-1.5 flex items-center justify-between border-t border-slate-200">
+                  <span className="text-[10px] text-slate-500 font-mono">
+                    {shopeeChecks.mappedCount === 6 ? "Đã nhận diện: 6/6 cột" : `Cần xác nhận ${6 - shopeeChecks.mappedCount} cột`}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMappingModalTab("shopee");
+                      setShowColumnMappingModal(true);
+                    }}
+                    className="px-2.5 py-1 text-[11px] font-black uppercase border border-black bg-slate-100 hover:bg-slate-200 text-black shadow-[1px_1px_0px_#141414] transition cursor-pointer flex items-center gap-1"
+                  >
+                    <SlidersHorizontal size={11} />
+                    <span>[ Chỉnh cột ]</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
 
           {/* File phần mềm bán hàng */}
@@ -534,6 +823,82 @@ export const EcommerceReconciliationView: React.FC = () => {
                 </div>
               )}
             </div>
+
+            {/* BLOCK TÓM TẮT TỐI GIẢN: KHỚP CỘT EXCEL – PHẦN MỀM BÁN HÀNG (Section 1, 5) */}
+            {salesResult && salesChecks && (
+              <div className="border-2 border-black bg-white p-3 space-y-2.5 shadow-[2px_2px_0px_#141414]">
+                <div className="flex items-center justify-between border-b-2 border-black pb-1.5">
+                  <span className="text-[11px] font-black uppercase text-black tracking-wider flex items-center gap-1.5">
+                    <span className="w-2 h-2 bg-blue-600 inline-block"></span>
+                    KHỚP CỘT EXCEL – PHẦN MỀM BÁN HÀNG
+                  </span>
+                  <span className={`text-[10px] font-black font-mono px-2 py-0.5 border ${
+                    salesChecks.mappedCount === 6
+                      ? "bg-green-100 text-green-800 border-green-300"
+                      : "bg-amber-100 text-amber-800 border-amber-300"
+                  }`}>
+                    Đã nhận diện: {salesChecks.mappedCount}/6 cột
+                  </span>
+                </div>
+
+                <div className="space-y-1 text-xs">
+                  {salesChecks.items.map((item) => (
+                    <div
+                      key={item.key}
+                      className="flex items-center justify-between py-0.5 px-1 rounded hover:bg-slate-50 text-[11px]"
+                    >
+                      <div className="flex items-center gap-1.5 min-w-0">
+                        {item.isMapped ? (
+                          <span className="text-green-700 font-black">✓</span>
+                        ) : (
+                          <span className="text-red-600 font-black">✕</span>
+                        )}
+                        <span className={`font-bold truncate ${item.isMapped ? "text-slate-800" : "text-red-700 font-black"}`}>
+                          {item.label}
+                        </span>
+                      </div>
+                      {item.header ? (
+                        <span className="text-[10px] text-slate-500 font-mono shrink-0 ml-2">
+                          {getSalesColLetterAndName(item.header)}
+                        </span>
+                      ) : (
+                        <span className="text-[10px] text-red-600 font-bold shrink-0">Chưa chọn</span>
+                      )}
+                    </div>
+                  ))}
+                </div>
+
+                {/* Nếu thiếu cột bắt buộc */}
+                {(!salesResult.detectedMapping.shopNameCol || !salesResult.detectedMapping.orderIdCol || !salesResult.detectedMapping.totalAmountCol) && (
+                  <div className="p-2 bg-amber-50 border-2 border-amber-400 text-xs space-y-1 rounded">
+                    <div className="flex items-center gap-1 font-black text-amber-900 text-[11px]">
+                      <AlertTriangle size={13} className="text-amber-700" />
+                      <span>Chưa nhận diện đủ các cột bắt buộc trên phần mềm</span>
+                    </div>
+                    <p className="text-[10px] text-amber-800">
+                      Bấm <strong>&quot;[ Chỉnh cột ]&quot;</strong> để chọn cột tương ứng.
+                    </p>
+                  </div>
+                )}
+
+                <div className="pt-1.5 flex items-center justify-between border-t border-slate-200">
+                  <span className="text-[10px] text-slate-500 font-mono">
+                    {salesChecks.mappedCount === 6 ? "Đã nhận diện: 6/6 cột" : `Cần xác nhận ${6 - salesChecks.mappedCount} cột`}
+                  </span>
+                  <button
+                    type="button"
+                    onClick={() => {
+                      setMappingModalTab("sales");
+                      setShowColumnMappingModal(true);
+                    }}
+                    className="px-2.5 py-1 text-[11px] font-black uppercase border border-black bg-slate-100 hover:bg-slate-200 text-black shadow-[1px_1px_0px_#141414] transition cursor-pointer flex items-center gap-1"
+                  >
+                    <SlidersHorizontal size={11} />
+                    <span>[ Chỉnh cột ]</span>
+                  </button>
+                </div>
+              </div>
+            )}
           </div>
         </div>
 
@@ -551,6 +916,28 @@ export const EcommerceReconciliationView: React.FC = () => {
                     ✓ File Shopee: {marketplaceResult.totalRows.toLocaleString()} dòng ({marketplaceResult.sheets.length} shop) •
                     ✓ File bán hàng: {salesResult.rows.length.toLocaleString()} dòng ({salesResult.detectedShops.length} shop) •
                     ✓ Đã nhận diện đủ cột bắt buộc
+                  </div>
+                  <div className="flex flex-wrap items-center gap-3 pt-1">
+                    <button
+                      type="button"
+                      onClick={() => {
+                        setMappingModalTab("shopee");
+                        setShowColumnMappingModal(true);
+                      }}
+                      className="text-[11px] font-bold text-blue-700 hover:text-blue-900 underline flex items-center gap-1 cursor-pointer"
+                    >
+                      <SlidersHorizontal size={12} />
+                      Kiểm tra / Tùy chỉnh khớp cột Excel
+                    </button>
+                    <span className="text-slate-300">|</span>
+                    <button
+                      type="button"
+                      onClick={() => setShowShopMappingModal(true)}
+                      className="text-[11px] font-bold text-slate-600 hover:text-black underline flex items-center gap-1 cursor-pointer"
+                    >
+                      <Store size={12} />
+                      Kiểm tra mapping shop ({shopMappings.length} shop)
+                    </button>
                   </div>
                 </div>
 
@@ -1015,198 +1402,852 @@ export const EcommerceReconciliationView: React.FC = () => {
         </div>
       )}
 
-      {/* MODAL MAPPING CỘT THỦ CÔNG (Chỉ hiển thị khi người dùng yêu cầu hoặc thiếu cột - Section 32, 38) */}
+      {/* MODAL MAPPING CỘT DỮ LIỆU EXCEL THEO ĐÚNG LOGIC ĐÃ KIỂM CHỨNG (Section A, B, C) */}
       {showColumnMappingModal && marketplaceResult && salesResult && (
-        <div className="fixed inset-0 bg-[#141414]/80 z-50 flex items-center justify-center p-4">
-          <div className="bg-white border-4 border-[#141414] max-w-2xl w-full p-6 shadow-[8px_8px_0px_#141414] space-y-4 max-h-[90vh] overflow-y-auto">
-            <div className="flex justify-between items-center border-b-2 border-black pb-2">
-              <h4 className="font-black text-xs uppercase tracking-wider text-black">
-                Tùy chỉnh chọn cột dữ liệu (Column Mapping)
-              </h4>
+        <div className="fixed inset-0 bg-[#141414]/85 z-50 flex items-center justify-center p-3 sm:p-4 backdrop-blur-xs">
+          <div className="bg-white border-4 border-[#141414] max-w-4xl w-full p-5 sm:p-6 shadow-[10px_10px_0px_#141414] space-y-4 max-h-[92vh] flex flex-col">
+            {/* Header Modal */}
+            <div className="flex justify-between items-start border-b-2 border-black pb-3 shrink-0">
+              <div className="space-y-0.5">
+                <div className="flex items-center gap-2">
+                  <span className="bg-[#141414] text-white px-2 py-0.5 text-[10px] font-black uppercase">
+                    CẤU HÌNH KHỚP CỘT
+                  </span>
+                  <h4 className="font-black text-sm uppercase tracking-wider text-black">
+                    Khớp Cột Dữ Liệu Excel (Shopee &amp; Phần Mềm Bán Hàng)
+                  </h4>
+                </div>
+                <p className="text-[11px] text-slate-600 font-medium">
+                  Chỉ hiển thị các trường tham gia tính toán, đối chiếu và xuất kết quả theo quy chuẩn kế toán.
+                </p>
+              </div>
               <button
                 onClick={() => setShowColumnMappingModal(false)}
-                className="text-xs font-bold px-2 py-1 bg-slate-200 hover:bg-slate-300"
+                className="text-xs font-black px-2.5 py-1 bg-slate-200 hover:bg-slate-300 border border-black cursor-pointer transition"
               >
                 ✕ Đóng
               </button>
             </div>
 
-            {/* File Sàn */}
-            <div className="space-y-2">
-              <span className="text-[10px] font-black uppercase text-orange-600 block">Cột File Sàn Shopee</span>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                <div>
-                  <label className="text-[10px] font-bold block mb-0.5">Mã đơn hàng (*Bắt buộc)</label>
-                  <select
-                    value={marketplaceResult.sheets[0]?.detectedMapping.orderIdCol || ""}
-                    onChange={(e) => {
-                      const updated = { ...marketplaceResult };
-                      updated.sheets.forEach(s => s.detectedMapping.orderIdCol = e.target.value);
-                      setMarketplaceResult(updated);
-                      saveHeaderMappings("marketplace", { orderIdCol: e.target.value });
-                    }}
-                    className="w-full border border-black p-1.5 text-xs font-mono font-bold"
-                  >
-                    <option value="">-- Chọn cột --</option>
-                    {marketplaceResult.sheets[0]?.headers.map(h => (
-                      <option key={h} value={h}>{h}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-[10px] font-bold block mb-0.5">Tiền người mua thanh toán</label>
-                  <select
-                    value={marketplaceResult.sheets[0]?.detectedMapping.buyerPaidCol || ""}
-                    onChange={(e) => {
-                      const updated = { ...marketplaceResult };
-                      updated.sheets.forEach(s => s.detectedMapping.buyerPaidCol = e.target.value);
-                      setMarketplaceResult(updated);
-                      saveHeaderMappings("marketplace", { buyerPaidCol: e.target.value });
-                    }}
-                    className="w-full border border-black p-1.5 text-xs font-mono font-bold"
-                  >
-                    <option value="">-- Chọn cột --</option>
-                    {marketplaceResult.sheets[0]?.headers.map(h => (
-                      <option key={h} value={h}>{h}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-[10px] font-bold block mb-0.5">Mã giảm giá của Shop</label>
-                  <select
-                    value={marketplaceResult.sheets[0]?.detectedMapping.shopVoucherCol || ""}
-                    onChange={(e) => {
-                      const updated = { ...marketplaceResult };
-                      updated.sheets.forEach(s => s.detectedMapping.shopVoucherCol = e.target.value);
-                      setMarketplaceResult(updated);
-                      saveHeaderMappings("marketplace", { shopVoucherCol: e.target.value });
-                    }}
-                    className="w-full border border-black p-1.5 text-xs font-mono font-bold"
-                  >
-                    <option value="">-- Không có (0đ) --</option>
-                    {marketplaceResult.sheets[0]?.headers.map(h => (
-                      <option key={h} value={h}>{h}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-[10px] font-bold block mb-0.5">Trạng thái đơn hàng</label>
-                  <select
-                    value={marketplaceResult.sheets[0]?.detectedMapping.orderStatusCol || ""}
-                    onChange={(e) => {
-                      const updated = { ...marketplaceResult };
-                      updated.sheets.forEach(s => s.detectedMapping.orderStatusCol = e.target.value);
-                      setMarketplaceResult(updated);
-                    }}
-                    className="w-full border border-black p-1.5 text-xs font-mono font-bold"
-                  >
-                    <option value="">-- Tự động --</option>
-                    {marketplaceResult.sheets[0]?.headers.map(h => (
-                      <option key={h} value={h}>{h}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-            </div>
-
-            {/* File Phần mềm bán hàng */}
-            <div className="space-y-2 pt-2 border-t border-slate-200">
-              <span className="text-[10px] font-black uppercase text-blue-700 block">Cột File Phần Mềm Bán Hàng</span>
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-xs">
-                <div>
-                  <label className="text-[10px] font-bold block mb-0.5">Tên Shop (*Bắt buộc)</label>
-                  <select
-                    value={salesResult.detectedMapping.shopNameCol}
-                    onChange={(e) => {
-                      setSalesResult({
-                        ...salesResult,
-                        detectedMapping: { ...salesResult.detectedMapping, shopNameCol: e.target.value }
-                      });
-                      saveHeaderMappings("sales", { shopNameCol: e.target.value });
-                    }}
-                    className="w-full border border-black p-1.5 text-xs font-mono font-bold"
-                  >
-                    <option value="">-- Chọn cột --</option>
-                    {salesResult.headers.map(h => (
-                      <option key={h} value={h}>{h}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-[10px] font-bold block mb-0.5">Số đơn hàng từ HT khác / Mã đơn (*Bắt buộc)</label>
-                  <select
-                    value={salesResult.detectedMapping.orderIdCol}
-                    onChange={(e) => {
-                      setSalesResult({
-                        ...salesResult,
-                        detectedMapping: { ...salesResult.detectedMapping, orderIdCol: e.target.value }
-                      });
-                      saveHeaderMappings("sales", { orderIdCol: e.target.value });
-                    }}
-                    className="w-full border border-black p-1.5 text-xs font-mono font-bold"
-                  >
-                    <option value="">-- Chọn cột --</option>
-                    {salesResult.headers.map(h => (
-                      <option key={h} value={h}>{h}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-[10px] font-bold block mb-0.5">Tổng tiền đối chiếu (*Bắt buộc)</label>
-                  <select
-                    value={salesResult.detectedMapping.totalAmountCol}
-                    onChange={(e) => {
-                      setSalesResult({
-                        ...salesResult,
-                        detectedMapping: { ...salesResult.detectedMapping, totalAmountCol: e.target.value }
-                      });
-                      saveHeaderMappings("sales", { totalAmountCol: e.target.value });
-                    }}
-                    className="w-full border border-black p-1.5 text-xs font-mono font-bold"
-                  >
-                    <option value="">-- Chọn cột --</option>
-                    {salesResult.headers.map(h => (
-                      <option key={h} value={h}>{h}</option>
-                    ))}
-                  </select>
-                </div>
-
-                <div>
-                  <label className="text-[10px] font-bold block mb-0.5">Số hóa đơn</label>
-                  <select
-                    value={salesResult.detectedMapping.invoiceNumberCol}
-                    onChange={(e) => {
-                      setSalesResult({
-                        ...salesResult,
-                        detectedMapping: { ...salesResult.detectedMapping, invoiceNumberCol: e.target.value }
-                      });
-                    }}
-                    className="w-full border border-black p-1.5 text-xs font-mono font-bold"
-                  >
-                    <option value="">-- Chọn cột --</option>
-                    {salesResult.headers.map(h => (
-                      <option key={h} value={h}>{h}</option>
-                    ))}
-                  </select>
-                </div>
-              </div>
-            </div>
-
-            <div className="text-right pt-2">
+            {/* Switcher Tab 2 File */}
+            <div className="flex border-b-2 border-black shrink-0 gap-1 bg-slate-100 p-1">
               <button
-                onClick={() => {
-                  setShowColumnMappingModal(false);
-                  showToast("Đã lưu cấu hình mapping cột!");
-                }}
-                className="bg-[#141414] text-white hover:bg-black font-black uppercase text-xs px-5 py-2 border-2 border-black"
+                type="button"
+                onClick={() => setMappingModalTab("shopee")}
+                className={`flex-1 py-2 px-3 text-xs font-black uppercase transition cursor-pointer flex items-center justify-center gap-2 border-2 ${
+                  mappingModalTab === "shopee"
+                    ? "bg-[#ff5722] text-white border-black shadow-[2px_2px_0px_#141414]"
+                    : "bg-white text-slate-700 border-transparent hover:bg-slate-200"
+                }`}
               >
-                Xác nhận
+                <span>A. File Dữ Liệu Sàn Shopee</span>
+                <span className={`text-[10px] px-1.5 py-0.2 rounded font-mono ${
+                  mappingModalTab === "shopee" ? "bg-black/30 text-white" : "bg-slate-200 text-black"
+                }`}>
+                  {marketplaceResult.sheets.length} shop
+                </span>
               </button>
+
+              <button
+                type="button"
+                onClick={() => setMappingModalTab("sales")}
+                className={`flex-1 py-2 px-3 text-xs font-black uppercase transition cursor-pointer flex items-center justify-center gap-2 border-2 ${
+                  mappingModalTab === "sales"
+                    ? "bg-blue-600 text-white border-black shadow-[2px_2px_0px_#141414]"
+                    : "bg-white text-slate-700 border-transparent hover:bg-slate-200"
+                }`}
+              >
+                <span>B. File Phần Mềm Bán Hàng</span>
+                <span className={`text-[10px] px-1.5 py-0.2 rounded font-mono ${
+                  mappingModalTab === "sales" ? "bg-black/30 text-white" : "bg-slate-200 text-black"
+                }`}>
+                  {salesResult.detectedShops.length} shop
+                </span>
+              </button>
+            </div>
+
+            {/* Nội dung mapping cuộn */}
+            <div className="overflow-y-auto flex-1 pr-1 space-y-5">
+              {/* TAB A: FILE SÀN SHOPEE */}
+              {mappingModalTab === "shopee" && (
+                <div className="space-y-5">
+                  {/* Banner hướng dẫn Shop Identifier */}
+                  <div className="bg-orange-50 border-2 border-orange-300 p-3 text-xs text-orange-950 flex items-start gap-2.5">
+                    <CheckCircle2 size={18} className="text-orange-700 shrink-0 mt-0.5" />
+                    <div>
+                      <span className="font-black uppercase block text-[11px] text-orange-900">
+                        Quy tắc Shop Identifier phía sàn Shopee:
+                      </span>
+                      <p className="text-[11px] text-orange-800 font-medium mt-0.5 leading-relaxed">
+                        Mỗi sheet trong file Excel tương ứng với một cửa hàng. Tên sheet được hệ thống tự động sử dụng làm định danh Shop. Do đó, <strong>KHÔNG cần mapping cột Tên Shop phía Shopee</strong>.
+                      </p>
+                    </div>
+                  </div>
+
+                  {/* NHÓM 1: KHÓA ĐỐI CHIẾU */}
+                  <div className="border-2 border-black p-3.5 bg-white space-y-3">
+                    <div className="flex items-center justify-between border-b border-black pb-1.5">
+                      <h5 className="font-black text-xs uppercase text-black flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 bg-black inline-block"></span>
+                        1. Khóa Đối Chiếu
+                      </h5>
+                      <span className="text-[10px] font-bold text-slate-500 uppercase">So khớp 1-1 đơn hàng</span>
+                    </div>
+
+                    <div className="space-y-1.5">
+                      <div className="flex flex-wrap items-center justify-between gap-1">
+                        <label className="text-xs font-black text-black">
+                          Mã đơn hàng <span className="text-red-600 font-black">*</span>
+                        </label>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] text-slate-500 font-mono bg-slate-100 px-1 py-0.5 border border-slate-200">
+                            Internal: marketplaceOrderId
+                          </span>
+                          {isExactShopeeHeader("orderIdCol", marketplaceResult.sheets[0]?.detectedMapping.orderIdCol || "") ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-black text-green-800 bg-green-100 border border-green-300 rounded">
+                              <Check size={11} className="text-green-700 stroke-[3]" /> Đã tự động nhận diện chính xác
+                            </span>
+                          ) : marketplaceResult.sheets[0]?.detectedMapping.orderIdCol ? (
+                            <span className="px-2 py-0.5 text-[10px] font-bold text-blue-800 bg-blue-100 border border-blue-300 rounded">
+                              Đã chọn
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 text-[10px] font-black text-red-800 bg-red-100 border border-red-300 rounded">
+                              Bắt buộc chọn (*)
+                            </span>
+                          )}
+                        </div>
+                      </div>
+                      <p className="text-[10px] text-slate-500">Auto-map ưu tiên: &quot;Mã đơn hàng&quot;</p>
+                      <select
+                        value={marketplaceResult.sheets[0]?.detectedMapping.orderIdCol || ""}
+                        onChange={(e) => handleUpdateShopeeMapping("orderIdCol", e.target.value)}
+                        className="w-full border-2 border-black p-2 text-xs font-mono font-bold bg-white focus:bg-amber-50"
+                      >
+                        <option value="">-- Chọn cột Excel (*Bắt buộc) --</option>
+                        {marketplaceResult.sheets[0]?.headers.map((h, idx) => (
+                          <option key={h} value={h}>
+                            {getColumnLetter(idx)} — {h}
+                          </option>
+                        ))}
+                      </select>
+
+                      {/* Preview Box */}
+                      {marketplaceResult.sheets[0]?.detectedMapping.orderIdCol && (
+                        <div className="bg-[#f8f8f6] border border-slate-300 p-2 text-[11px] space-y-1">
+                          <div className="flex items-center justify-between text-[10px] text-slate-600 font-bold">
+                            <span>👁 Xem trước mẫu dữ liệu (3-5 dòng đầu):</span>
+                            <span>Cột {getColumnLetter(marketplaceResult.sheets[0].headers.indexOf(marketplaceResult.sheets[0].detectedMapping.orderIdCol))}</span>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {getShopeePreviewValues(marketplaceResult.sheets[0].detectedMapping.orderIdCol).map((v, i) => (
+                              <span key={i} className="bg-white px-2 py-0.5 text-[11px] font-mono font-bold text-black border border-slate-300 rounded">
+                                {v}
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* NHÓM 2: THÔNG TIN TRẠNG THÁI */}
+                  <div className="border-2 border-black p-3.5 bg-white space-y-4">
+                    <div className="flex items-center justify-between border-b border-black pb-1.5">
+                      <h5 className="font-black text-xs uppercase text-black flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 bg-black inline-block"></span>
+                        2. Thông Tin Trạng Thái
+                      </h5>
+                      <span className="text-[10px] font-bold text-slate-500 uppercase">Trạng thái đơn, giao hàng &amp; hoàn tiền</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {/* Trạng thái đơn hàng */}
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-1">
+                          <label className="text-xs font-black text-black">
+                            Trạng thái đơn hàng <span className="text-red-600 font-black">*</span>
+                          </label>
+                          <span className="text-[10px] text-slate-500 font-mono bg-slate-100 px-1 py-0.5 border border-slate-200">
+                            orderStatus
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-[10px]">
+                          <span className="text-slate-500">Auto-map: &quot;Trạng Thái Đơn Hàng&quot;</span>
+                          {isExactShopeeHeader("orderStatusCol", marketplaceResult.sheets[0]?.detectedMapping.orderStatusCol || "") ? (
+                            <span className="text-green-800 font-bold flex items-center gap-0.5">
+                              <Check size={10} /> Đã nhận diện
+                            </span>
+                          ) : null}
+                        </div>
+                        <select
+                          value={marketplaceResult.sheets[0]?.detectedMapping.orderStatusCol || ""}
+                          onChange={(e) => handleUpdateShopeeMapping("orderStatusCol", e.target.value)}
+                          className="w-full border-2 border-black p-2 text-xs font-mono font-bold bg-white"
+                        >
+                          <option value="">-- Chọn cột Excel (*Bắt buộc) --</option>
+                          {marketplaceResult.sheets[0]?.headers.map((h, idx) => (
+                            <option key={h} value={h}>
+                              {getColumnLetter(idx)} — {h}
+                            </option>
+                          ))}
+                        </select>
+                        {marketplaceResult.sheets[0]?.detectedMapping.orderStatusCol && (
+                          <div className="bg-[#f8f8f6] border border-slate-300 p-1.5 text-[10px] flex items-center gap-1.5 overflow-x-auto">
+                            <span className="text-slate-500 font-bold shrink-0">Mẫu:</span>
+                            {getShopeePreviewValues(marketplaceResult.sheets[0].detectedMapping.orderStatusCol).map((v, i) => (
+                              <span key={i} className="bg-white px-1.5 py-0.5 font-mono font-bold border border-slate-300 rounded shrink-0">
+                                {v}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Thời gian giao hàng */}
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-1">
+                          <label className="text-xs font-bold text-black">
+                            Thời gian giao hàng
+                          </label>
+                          <span className="text-[10px] text-slate-500 font-mono bg-slate-100 px-1 py-0.5 border border-slate-200">
+                            deliveryTime
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-[10px]">
+                          <span className="text-slate-500">Auto-map: &quot;Thời gian giao hàng&quot;</span>
+                          {isExactShopeeHeader("deliveryTimeCol", marketplaceResult.sheets[0]?.detectedMapping.deliveryTimeCol || "") ? (
+                            <span className="text-green-800 font-bold flex items-center gap-0.5">
+                              <Check size={10} /> Đã nhận diện
+                            </span>
+                          ) : null}
+                        </div>
+                        <select
+                          value={marketplaceResult.sheets[0]?.detectedMapping.deliveryTimeCol || ""}
+                          onChange={(e) => handleUpdateShopeeMapping("deliveryTimeCol", e.target.value)}
+                          className="w-full border-2 border-black p-2 text-xs font-mono font-bold bg-white"
+                        >
+                          <option value="">-- Không chọn / Bỏ qua --</option>
+                          {marketplaceResult.sheets[0]?.headers.map((h, idx) => (
+                            <option key={h} value={h}>
+                              {getColumnLetter(idx)} — {h}
+                            </option>
+                          ))}
+                        </select>
+                        {marketplaceResult.sheets[0]?.detectedMapping.deliveryTimeCol && (
+                          <div className="bg-[#f8f8f6] border border-slate-300 p-1.5 text-[10px] flex items-center gap-1.5 overflow-x-auto">
+                            <span className="text-slate-500 font-bold shrink-0">Mẫu:</span>
+                            {getShopeePreviewValues(marketplaceResult.sheets[0].detectedMapping.deliveryTimeCol).map((v, i) => (
+                              <span key={i} className="bg-white px-1.5 py-0.5 font-mono font-bold border border-slate-300 rounded shrink-0">
+                                {v}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Trạng thái Trả hàng/Hoàn tiền */}
+                      <div className="space-y-1.5 md:col-span-2">
+                        <div className="flex flex-wrap items-center justify-between gap-1">
+                          <label className="text-xs font-black text-black">
+                            Trạng thái Trả hàng/Hoàn tiền <span className="text-red-600 font-black">*</span>
+                          </label>
+                          <span className="text-[10px] text-slate-500 font-mono bg-slate-100 px-1 py-0.5 border border-slate-200">
+                            returnRefundStatus
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-[10px]">
+                          <span className="text-slate-500">Auto-map: &quot;Trạng thái Trả hàng/Hoàn tiền&quot;</span>
+                          {isExactShopeeHeader("returnRefundCol", marketplaceResult.sheets[0]?.detectedMapping.returnRefundCol || "") ? (
+                            <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-bold text-green-800 bg-green-100 border border-green-300 rounded">
+                              <Check size={10} /> Đã tự động nhận diện chính xác
+                            </span>
+                          ) : null}
+                        </div>
+                        <select
+                          value={marketplaceResult.sheets[0]?.detectedMapping.returnRefundCol || ""}
+                          onChange={(e) => handleUpdateShopeeMapping("returnRefundCol", e.target.value)}
+                          className="w-full border-2 border-black p-2 text-xs font-mono font-bold bg-white"
+                        >
+                          <option value="">-- Chọn cột Excel (*Bắt buộc) --</option>
+                          {marketplaceResult.sheets[0]?.headers.map((h, idx) => (
+                            <option key={h} value={h}>
+                              {getColumnLetter(idx)} — {h}
+                            </option>
+                          ))}
+                        </select>
+                        {marketplaceResult.sheets[0]?.detectedMapping.returnRefundCol && (
+                          <div className="bg-[#f8f8f6] border border-slate-300 p-2 text-[11px] space-y-1">
+                            <div className="flex items-center justify-between text-[10px] text-slate-600 font-bold">
+                              <span>👁 Mẫu dữ liệu hoàn tiền:</span>
+                            </div>
+                            <div className="flex flex-wrap gap-1.5">
+                              {getShopeePreviewValues(marketplaceResult.sheets[0].detectedMapping.returnRefundCol).map((v, i) => (
+                                <span key={i} className="bg-white px-2 py-0.5 text-[11px] font-mono font-bold text-black border border-slate-300 rounded">
+                                  {v}
+                                </span>
+                              ))}
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* NHÓM 3: TÍNH DOANH THU (CHÚ Ý CẢNH BÁO HAI CỘT KHÁC NHAU) */}
+                  <div className="border-2 border-black p-3.5 bg-white space-y-4">
+                    <div className="flex items-center justify-between border-b border-black pb-1.5">
+                      <h5 className="font-black text-xs uppercase text-black flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 bg-green-600 inline-block"></span>
+                        3. Tính Doanh Thu
+                      </h5>
+                      <span className="text-[10px] font-bold text-slate-500 uppercase">Cộng dòng tiền &amp; trừ voucher</span>
+                    </div>
+
+                    {/* Cột Tổng số tiền Người mua thanh toán */}
+                    <div className="space-y-2">
+                      <div className="flex flex-wrap items-center justify-between gap-1">
+                        <label className="text-xs font-black text-black">
+                          Tổng số tiền Người mua thanh toán <span className="text-red-600 font-black">*</span>
+                        </label>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] text-slate-500 font-mono bg-slate-100 px-1 py-0.5 border border-slate-200">
+                            Internal: buyerPaidLineAmount
+                          </span>
+                          {isExactShopeeHeader("buyerPaidCol", marketplaceResult.sheets[0]?.detectedMapping.buyerPaidCol || "") ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-black text-green-800 bg-green-100 border border-green-300 rounded">
+                              <Check size={11} className="text-green-700 stroke-[3]" /> Khớp chính xác case-sensitive
+                            </span>
+                          ) : (
+                            <span className="px-2 py-0.5 text-[10px] font-black text-amber-800 bg-amber-100 border border-amber-300 rounded">
+                              Cần kiểm tra kỹ
+                            </span>
+                          )}
+                        </div>
+                      </div>
+
+                      {/* Khung cảnh báo phân biệt 2 header có thật của Shopee */}
+                      <div className="bg-amber-50 border-2 border-amber-400 p-2.5 text-xs space-y-1">
+                        <div className="flex items-center gap-1.5 font-black text-amber-900 uppercase text-[11px]">
+                          <AlertTriangle size={15} className="text-amber-700 shrink-0" />
+                          <span>Cảnh báo kế toán: Phân biệt 2 cột trong file xuất Shopee</span>
+                        </div>
+                        <p className="text-[11px] text-amber-900 leading-relaxed font-medium">
+                          Trong file Shopee thực tế tồn tại đồng thời 2 header: <strong>&quot;Tổng số tiền Người mua thanh toán&quot;</strong> (chữ N hoa) và <strong>&quot;Tổng số tiền người mua thanh toán&quot;</strong> (chữ n thường). Đây là hai cột khác nhau. Reconciliation engine hiện tại bắt buộc phải sử dụng cột chữ N hoa để đối chiếu chính xác.
+                        </p>
+                      </div>
+
+                      <select
+                        value={marketplaceResult.sheets[0]?.detectedMapping.buyerPaidCol || ""}
+                        onChange={(e) => handleUpdateShopeeMapping("buyerPaidCol", e.target.value)}
+                        className="w-full border-2 border-black p-2.5 text-xs font-mono font-bold bg-white focus:bg-amber-50"
+                      >
+                        <option value="">-- Chọn cột Excel (*Bắt buộc) --</option>
+                        {marketplaceResult.sheets[0]?.headers.map((h, idx) => (
+                          <option key={h} value={h}>
+                            {getColumnLetter(idx)} — {h}
+                          </option>
+                        ))}
+                      </select>
+
+                      {marketplaceResult.sheets[0]?.detectedMapping.buyerPaidCol && (
+                        <div className="bg-[#f8f8f6] border border-slate-300 p-2 text-[11px] space-y-1">
+                          <div className="flex items-center justify-between text-[10px] text-slate-600 font-bold">
+                            <span>👁 Mẫu số tiền người mua trả (3-5 dòng đầu):</span>
+                            <span>Cột {getColumnLetter(marketplaceResult.sheets[0].headers.indexOf(marketplaceResult.sheets[0].detectedMapping.buyerPaidCol))}</span>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {getShopeePreviewValues(marketplaceResult.sheets[0].detectedMapping.buyerPaidCol).map((v, i) => (
+                              <span key={i} className="bg-white px-2 py-0.5 text-[11px] font-mono font-bold text-black border border-slate-300 rounded">
+                                {Number(v).toLocaleString("vi-VN")} đ
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Cột Mã giảm giá của Shop */}
+                    <div className="space-y-2 pt-2 border-t border-slate-200">
+                      <div className="flex flex-wrap items-center justify-between gap-1">
+                        <label className="text-xs font-black text-black">
+                          Mã giảm giá của Shop <span className="text-red-600 font-black">*</span>
+                        </label>
+                        <div className="flex items-center gap-1.5">
+                          <span className="text-[10px] text-slate-500 font-mono bg-slate-100 px-1 py-0.5 border border-slate-200">
+                            Internal: shopVoucher
+                          </span>
+                          {isExactShopeeHeader("shopVoucherCol", marketplaceResult.sheets[0]?.detectedMapping.shopVoucherCol || "") ? (
+                            <span className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-bold text-green-800 bg-green-100 border border-green-300 rounded">
+                              <Check size={11} className="text-green-700" /> Đã nhận diện
+                            </span>
+                          ) : null}
+                        </div>
+                      </div>
+                      <p className="text-[10px] text-slate-500">
+                        Voucher Shop tài trợ: Chỉ trừ 1 lần duy nhất cho mỗi đơn hàng (kể cả đơn nhiều dòng SKU lặp lại voucher).
+                      </p>
+                      <select
+                        value={marketplaceResult.sheets[0]?.detectedMapping.shopVoucherCol || ""}
+                        onChange={(e) => handleUpdateShopeeMapping("shopVoucherCol", e.target.value)}
+                        className="w-full border-2 border-black p-2 text-xs font-mono font-bold bg-white"
+                      >
+                        <option value="">-- Chọn cột Excel (*Bắt buộc) --</option>
+                        {marketplaceResult.sheets[0]?.headers.map((h, idx) => (
+                          <option key={h} value={h}>
+                            {getColumnLetter(idx)} — {h}
+                          </option>
+                        ))}
+                      </select>
+
+                      {marketplaceResult.sheets[0]?.detectedMapping.shopVoucherCol && (
+                        <div className="bg-[#f8f8f6] border border-slate-300 p-2 text-[11px] space-y-1">
+                          <div className="flex items-center justify-between text-[10px] text-slate-600 font-bold">
+                            <span>👁 Mẫu voucher shop (3-5 dòng đầu):</span>
+                            <span>Cột {getColumnLetter(marketplaceResult.sheets[0].headers.indexOf(marketplaceResult.sheets[0].detectedMapping.shopVoucherCol))}</span>
+                          </div>
+                          <div className="flex flex-wrap gap-1.5">
+                            {getShopeePreviewValues(marketplaceResult.sheets[0].detectedMapping.shopVoucherCol).map((v, i) => (
+                              <span key={i} className="bg-white px-2 py-0.5 text-[11px] font-mono font-bold text-black border border-slate-300 rounded">
+                                {Number(v).toLocaleString("vi-VN")} đ
+                              </span>
+                            ))}
+                          </div>
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                </div>
+              )}
+
+              {/* TAB B: FILE PHẦN MỀM BÁN HÀNG */}
+              {mappingModalTab === "sales" && (
+                <div className="space-y-5">
+                  {/* NHÓM 1: KHÓA ĐỐI CHIẾU */}
+                  <div className="border-2 border-black p-3.5 bg-white space-y-3">
+                    <div className="flex items-center justify-between border-b border-black pb-1.5">
+                      <h5 className="font-black text-xs uppercase text-black flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 bg-blue-600 inline-block"></span>
+                        1. Khóa Đối Chiếu (Shop + Mã Đơn)
+                      </h5>
+                      <span className="text-[10px] font-bold text-slate-500 uppercase">Khóa composite ghép với Sàn</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {/* Tên Shop */}
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-1">
+                          <label className="text-xs font-black text-black">
+                            Tên Shop <span className="text-red-600 font-black">*</span>
+                          </label>
+                          <span className="text-[10px] text-slate-500 font-mono bg-slate-100 px-1 py-0.5 border border-slate-200">
+                            salesShopName
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-[10px]">
+                          <span className="text-slate-500">Auto-map: &quot;Tên shop&quot;</span>
+                          {isExactSalesHeader("shopNameCol", salesResult.detectedMapping.shopNameCol) ? (
+                            <span className="text-green-800 font-bold flex items-center gap-0.5">
+                              <Check size={10} /> Đã nhận diện
+                            </span>
+                          ) : null}
+                        </div>
+                        <select
+                          value={salesResult.detectedMapping.shopNameCol}
+                          onChange={(e) => handleUpdateSalesMapping("shopNameCol", e.target.value)}
+                          className="w-full border-2 border-black p-2 text-xs font-mono font-bold bg-white"
+                        >
+                          <option value="">-- Chọn cột Excel (*Bắt buộc) --</option>
+                          {salesResult.headers.map((h, idx) => (
+                            <option key={h} value={h}>
+                              {getColumnLetter(idx)} — {h}
+                            </option>
+                          ))}
+                        </select>
+                        {salesResult.detectedMapping.shopNameCol && (
+                          <div className="bg-[#f8f8f6] border border-slate-300 p-1.5 text-[10px] flex items-center gap-1.5 overflow-x-auto">
+                            <span className="text-slate-500 font-bold shrink-0">Mẫu:</span>
+                            {getSalesPreviewValues(salesResult.detectedMapping.shopNameCol).map((v, i) => (
+                              <span key={i} className="bg-white px-1.5 py-0.5 font-mono font-bold border border-slate-300 rounded shrink-0">
+                                {v}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Mã đơn từ sàn */}
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-1">
+                          <label className="text-xs font-black text-black">
+                            Mã đơn từ sàn <span className="text-red-600 font-black">*</span>
+                          </label>
+                          <span className="text-[10px] text-slate-500 font-mono bg-slate-100 px-1 py-0.5 border border-slate-200">
+                            salesMarketplaceOrderId
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-[10px]">
+                          <span className="text-slate-500">Auto-map: &quot;Số đơn hàng từ sàn&quot; / HT khác</span>
+                          {isExactSalesHeader("orderIdCol", salesResult.detectedMapping.orderIdCol) ? (
+                            <span className="text-green-800 font-bold flex items-center gap-0.5">
+                              <Check size={10} /> Đã nhận diện
+                            </span>
+                          ) : null}
+                        </div>
+                        <select
+                          value={salesResult.detectedMapping.orderIdCol}
+                          onChange={(e) => handleUpdateSalesMapping("orderIdCol", e.target.value)}
+                          className="w-full border-2 border-black p-2 text-xs font-mono font-bold bg-white"
+                        >
+                          <option value="">-- Chọn cột Excel (*Bắt buộc) --</option>
+                          {salesResult.headers.map((h, idx) => (
+                            <option key={h} value={h}>
+                              {getColumnLetter(idx)} — {h}
+                            </option>
+                          ))}
+                        </select>
+                        {salesResult.detectedMapping.orderIdCol && (
+                          <div className="bg-[#f8f8f6] border border-slate-300 p-1.5 text-[10px] flex items-center gap-1.5 overflow-x-auto">
+                            <span className="text-slate-500 font-bold shrink-0">Mẫu:</span>
+                            {getSalesPreviewValues(salesResult.detectedMapping.orderIdCol).map((v, i) => (
+                              <span key={i} className="bg-white px-1.5 py-0.5 font-mono font-bold border border-slate-300 rounded shrink-0">
+                                {v}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* NHÓM 2: THÔNG TIN HÓA ĐƠN */}
+                  <div className="border-2 border-black p-3.5 bg-white space-y-3">
+                    <div className="flex items-center justify-between border-b border-black pb-1.5">
+                      <h5 className="font-black text-xs uppercase text-black flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 bg-blue-600 inline-block"></span>
+                        2. Thông Tin Hóa Đơn &amp; Chứng Từ
+                      </h5>
+                      <span className="text-[10px] font-bold text-slate-500 uppercase">Đối chiếu số &amp; ngày hóa đơn</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {/* Số chứng từ / Số hóa đơn */}
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-1">
+                          <label className="text-xs font-black text-black">
+                            Số chứng từ / Số hóa đơn <span className="text-red-600 font-black">*</span>
+                          </label>
+                          <span className="text-[10px] text-slate-500 font-mono bg-slate-100 px-1 py-0.5 border border-slate-200">
+                            salesInvoiceNumber
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-[10px]">
+                          <span className="text-slate-500">Auto-map: &quot;Số hóa đơn&quot; hoặc &quot;Số chứng từ&quot;</span>
+                          {isExactSalesHeader("invoiceNumberCol", salesResult.detectedMapping.invoiceNumberCol) ? (
+                            <span className="text-green-800 font-bold flex items-center gap-0.5">
+                              <Check size={10} /> Đã nhận diện
+                            </span>
+                          ) : null}
+                        </div>
+                        <select
+                          value={salesResult.detectedMapping.invoiceNumberCol}
+                          onChange={(e) => handleUpdateSalesMapping("invoiceNumberCol", e.target.value)}
+                          className="w-full border-2 border-black p-2 text-xs font-mono font-bold bg-white"
+                        >
+                          <option value="">-- Chọn cột Excel (*Bắt buộc) --</option>
+                          {salesResult.headers.map((h, idx) => (
+                            <option key={h} value={h}>
+                              {getColumnLetter(idx)} — {h}
+                            </option>
+                          ))}
+                        </select>
+                        {salesResult.detectedMapping.invoiceNumberCol && (
+                          <div className="bg-[#f8f8f6] border border-slate-300 p-1.5 text-[10px] flex items-center gap-1.5 overflow-x-auto">
+                            <span className="text-slate-500 font-bold shrink-0">Mẫu:</span>
+                            {getSalesPreviewValues(salesResult.detectedMapping.invoiceNumberCol).map((v, i) => (
+                              <span key={i} className="bg-white px-1.5 py-0.5 font-mono font-bold border border-slate-300 rounded shrink-0">
+                                {v}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Ngày hóa đơn */}
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-1">
+                          <label className="text-xs font-black text-black">
+                            Ngày hóa đơn <span className="text-red-600 font-black">*</span>
+                          </label>
+                          <span className="text-[10px] text-slate-500 font-mono bg-slate-100 px-1 py-0.5 border border-slate-200">
+                            salesInvoiceDate
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-[10px]">
+                          <span className="text-slate-500">Auto-map: &quot;Ngày hóa đơn&quot; hoặc &quot;Ngày chứng từ&quot;</span>
+                          {isExactSalesHeader("invoiceDateCol", salesResult.detectedMapping.invoiceDateCol) ? (
+                            <span className="text-green-800 font-bold flex items-center gap-0.5">
+                              <Check size={10} /> Đã nhận diện
+                            </span>
+                          ) : null}
+                        </div>
+                        <select
+                          value={salesResult.detectedMapping.invoiceDateCol}
+                          onChange={(e) => handleUpdateSalesMapping("invoiceDateCol", e.target.value)}
+                          className="w-full border-2 border-black p-2 text-xs font-mono font-bold bg-white"
+                        >
+                          <option value="">-- Chọn cột Excel (*Bắt buộc) --</option>
+                          {salesResult.headers.map((h, idx) => (
+                            <option key={h} value={h}>
+                              {getColumnLetter(idx)} — {h}
+                            </option>
+                          ))}
+                        </select>
+                        {salesResult.detectedMapping.invoiceDateCol && (
+                          <div className="bg-[#f8f8f6] border border-slate-300 p-1.5 text-[10px] flex items-center gap-1.5 overflow-x-auto">
+                            <span className="text-slate-500 font-bold shrink-0">Mẫu:</span>
+                            {getSalesPreviewValues(salesResult.detectedMapping.invoiceDateCol).map((v, i) => (
+                              <span key={i} className="bg-white px-1.5 py-0.5 font-mono font-bold border border-slate-300 rounded shrink-0">
+                                {v}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* NHÓM 3: TÍNH DOANH THU */}
+                  <div className="border-2 border-black p-3.5 bg-white space-y-3">
+                    <div className="flex items-center justify-between border-b border-black pb-1.5">
+                      <h5 className="font-black text-xs uppercase text-black flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 bg-green-600 inline-block"></span>
+                        3. Tính Doanh Thu Phần Mềm
+                      </h5>
+                      <span className="text-[10px] font-bold text-slate-500 uppercase">Tổng tiền bán hàng &amp; Voucher</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {/* Tổng tiền */}
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-1">
+                          <label className="text-xs font-black text-black">
+                            Tổng tiền <span className="text-red-600 font-black">*</span>
+                          </label>
+                          <span className="text-[10px] text-slate-500 font-mono bg-slate-100 px-1 py-0.5 border border-slate-200">
+                            salesTotalAmount
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-[10px]">
+                          <span className="text-slate-500">Auto-map: &quot;Tổng tiền&quot; / Thành tiền sau thuế</span>
+                          {isExactSalesHeader("totalAmountCol", salesResult.detectedMapping.totalAmountCol) ? (
+                            <span className="text-green-800 font-bold flex items-center gap-0.5">
+                              <Check size={10} /> Đã nhận diện
+                            </span>
+                          ) : null}
+                        </div>
+                        <select
+                          value={salesResult.detectedMapping.totalAmountCol}
+                          onChange={(e) => handleUpdateSalesMapping("totalAmountCol", e.target.value)}
+                          className="w-full border-2 border-black p-2 text-xs font-mono font-bold bg-white"
+                        >
+                          <option value="">-- Chọn cột Excel (*Bắt buộc) --</option>
+                          {salesResult.headers.map((h, idx) => (
+                            <option key={h} value={h}>
+                              {getColumnLetter(idx)} — {h}
+                            </option>
+                          ))}
+                        </select>
+                        {salesResult.detectedMapping.totalAmountCol && (
+                          <div className="bg-[#f8f8f6] border border-slate-300 p-1.5 text-[10px] flex items-center gap-1.5 overflow-x-auto">
+                            <span className="text-slate-500 font-bold shrink-0">Mẫu:</span>
+                            {getSalesPreviewValues(salesResult.detectedMapping.totalAmountCol).map((v, i) => (
+                              <span key={i} className="bg-white px-1.5 py-0.5 font-mono font-bold border border-slate-300 rounded shrink-0">
+                                {Number(v).toLocaleString("vi-VN")} đ
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Giảm giá hóa đơn */}
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-1">
+                          <label className="text-xs font-bold text-black">
+                            Giảm giá hóa đơn
+                          </label>
+                          <span className="text-[10px] text-slate-500 font-mono bg-slate-100 px-1 py-0.5 border border-slate-200">
+                            salesInvoiceDiscount
+                          </span>
+                        </div>
+                        <div className="flex items-center justify-between text-[10px]">
+                          <span className="text-slate-500">Auto-map: &quot;Giảm giá hóa đơn&quot; hoặc &quot;Voucher&quot;</span>
+                          {salesResult.detectedMapping.invoiceDiscountCol ? (
+                            <span className="text-blue-800 font-bold flex items-center gap-0.5">
+                              Đã chọn
+                            </span>
+                          ) : (
+                            <span className="text-slate-400">Không bắt buộc</span>
+                          )}
+                        </div>
+                        <select
+                          value={salesResult.detectedMapping.invoiceDiscountCol || ""}
+                          onChange={(e) => handleUpdateSalesMapping("invoiceDiscountCol", e.target.value)}
+                          className="w-full border-2 border-black p-2 text-xs font-mono font-bold bg-white"
+                        >
+                          <option value="">-- Không có / Bỏ qua (0đ) --</option>
+                          {salesResult.headers.map((h, idx) => (
+                            <option key={h} value={h}>
+                              {getColumnLetter(idx)} — {h}
+                            </option>
+                          ))}
+                        </select>
+                        {salesResult.detectedMapping.invoiceDiscountCol && (
+                          <div className="bg-[#f8f8f6] border border-slate-300 p-1.5 text-[10px] flex items-center gap-1.5 overflow-x-auto">
+                            <span className="text-slate-500 font-bold shrink-0">Mẫu:</span>
+                            {getSalesPreviewValues(salesResult.detectedMapping.invoiceDiscountCol).map((v, i) => (
+                              <span key={i} className="bg-white px-1.5 py-0.5 font-mono font-bold border border-slate-300 rounded shrink-0">
+                                {Number(v).toLocaleString("vi-VN")} đ
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* NHÓM 4: VALIDATION & CANCELLED */}
+                  <div className="border-2 border-black p-3.5 bg-white space-y-3">
+                    <div className="flex items-center justify-between border-b border-black pb-1.5">
+                      <h5 className="font-black text-xs uppercase text-black flex items-center gap-1.5">
+                        <span className="w-2.5 h-2.5 bg-purple-600 inline-block"></span>
+                        4. Validation Kênh Bán &amp; Trạng Thái Hủy
+                      </h5>
+                      <span className="text-[10px] font-bold text-slate-500 uppercase">Kiểm soát đơn ngoại sàn &amp; đơn hủy</span>
+                    </div>
+
+                    <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                      {/* Kênh bán hàng */}
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-1">
+                          <label className="text-xs font-black text-black">
+                            Kênh bán hàng <span className="text-red-600 font-black">*</span>
+                          </label>
+                          <span className="text-[10px] text-slate-500 font-mono bg-slate-100 px-1 py-0.5 border border-slate-200">
+                            marketplaceName
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-slate-500">
+                          Auto-map: &quot;Sàn TMĐT&quot; hoặc &quot;Kênh bán hàng&quot;. Cảnh báo nếu giá trị khác Shopee.
+                        </p>
+                        <select
+                          value={salesResult.detectedMapping.marketplaceCol || ""}
+                          onChange={(e) => handleUpdateSalesMapping("marketplaceCol", e.target.value)}
+                          className="w-full border-2 border-black p-2 text-xs font-mono font-bold bg-white"
+                        >
+                          <option value="">-- Chọn cột (Mặc định: Tất cả là Shopee) --</option>
+                          {salesResult.headers.map((h, idx) => (
+                            <option key={h} value={h}>
+                              {getColumnLetter(idx)} — {h}
+                            </option>
+                          ))}
+                        </select>
+                        {salesResult.detectedMapping.marketplaceCol && (
+                          <div className="bg-[#f8f8f6] border border-slate-300 p-1.5 text-[10px] flex items-center gap-1.5 overflow-x-auto">
+                            <span className="text-slate-500 font-bold shrink-0">Mẫu:</span>
+                            {getSalesPreviewValues(salesResult.detectedMapping.marketplaceCol).map((v, i) => (
+                              <span key={i} className="bg-white px-1.5 py-0.5 font-mono font-bold border border-slate-300 rounded shrink-0">
+                                {v}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+
+                      {/* Trạng thái hủy */}
+                      <div className="space-y-1.5">
+                        <div className="flex flex-wrap items-center justify-between gap-1">
+                          <label className="text-xs font-bold text-black">
+                            Trạng thái hủy
+                          </label>
+                          <span className="text-[10px] text-slate-500 font-mono bg-slate-100 px-1 py-0.5 border border-slate-200">
+                            salesIsCancelled
+                          </span>
+                        </div>
+                        <p className="text-[10px] text-slate-500">
+                          Auto-map: &quot;Hủy&quot; hoặc &quot;Trạng thái hủy&quot;. Phát hiện đơn đã hủy trên PM.
+                        </p>
+                        <select
+                          value={salesResult.detectedMapping.cancelledCol || ""}
+                          onChange={(e) => handleUpdateSalesMapping("cancelledCol", e.target.value)}
+                          className="w-full border-2 border-black p-2 text-xs font-mono font-bold bg-white"
+                        >
+                          <option value="">-- Không có / Bỏ qua --</option>
+                          {salesResult.headers.map((h, idx) => (
+                            <option key={h} value={h}>
+                              {getColumnLetter(idx)} — {h}
+                            </option>
+                          ))}
+                        </select>
+                        {salesResult.detectedMapping.cancelledCol && (
+                          <div className="bg-[#f8f8f6] border border-slate-300 p-1.5 text-[10px] flex items-center gap-1.5 overflow-x-auto">
+                            <span className="text-slate-500 font-bold shrink-0">Mẫu:</span>
+                            {getSalesPreviewValues(salesResult.detectedMapping.cancelledCol).map((v, i) => (
+                              <span key={i} className="bg-white px-1.5 py-0.5 font-mono font-bold border border-slate-300 rounded shrink-0">
+                                {v}
+                              </span>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    </div>
+                  </div>
+                </div>
+              )}
+            </div>
+
+            {/* Modal Footer Actions */}
+            <div className="flex flex-col sm:flex-row items-center justify-between gap-3 pt-3 border-t-2 border-black shrink-0">
+              <button
+                type="button"
+                onClick={handleResetAutoDetection}
+                className="w-full sm:w-auto px-4 py-2 text-xs font-bold uppercase border-2 border-black bg-white hover:bg-slate-100 text-black flex items-center justify-center gap-1.5 cursor-pointer transition"
+              >
+                <RotateCcw size={14} />
+                <span>Tự động nhận diện lại</span>
+              </button>
+
+              <div className="flex items-center gap-2 w-full sm:w-auto">
+                <button
+                  type="button"
+                  onClick={() => setShowColumnMappingModal(false)}
+                  className="flex-1 sm:flex-none px-4 py-2.5 text-xs font-bold uppercase border-2 border-black bg-slate-200 hover:bg-slate-300 text-black cursor-pointer transition"
+                >
+                  Đóng
+                </button>
+                <button
+                  type="button"
+                  onClick={() => {
+                    const shopeeM = marketplaceResult.sheets[0]?.detectedMapping;
+                    if (!shopeeM?.orderIdCol || !shopeeM?.buyerPaidCol || !shopeeM?.orderStatusCol || !shopeeM?.returnRefundCol) {
+                      showToast("Vui lòng cấu hình đủ các trường bắt buộc (*) cho File Shopee!", "warning");
+                      setMappingModalTab("shopee");
+                      return;
+                    }
+                    if (!salesResult.detectedMapping.shopNameCol || !salesResult.detectedMapping.orderIdCol || !salesResult.detectedMapping.totalAmountCol) {
+                      showToast("Vui lòng cấu hình đủ các trường bắt buộc (*) cho File Phần mềm bán hàng!", "warning");
+                      setMappingModalTab("sales");
+                      return;
+                    }
+                    setShowColumnMappingModal(false);
+                    showToast("Đã lưu cấu hình mapping cột và sẵn sàng đối chiếu!", "success");
+                  }}
+                  className="flex-1 sm:flex-none px-6 py-2.5 bg-[#00ff00] hover:bg-[#05e005] text-black font-black uppercase text-xs border-2 border-black shadow-[3px_3px_0px_#141414] hover:shadow-[5px_5px_0px_#141414] transition cursor-pointer flex items-center justify-center gap-1.5"
+                >
+                  <CheckCircle2 size={16} />
+                  <span>Xác nhận &amp; Áp dụng mapping</span>
+                </button>
+              </div>
             </div>
           </div>
         </div>

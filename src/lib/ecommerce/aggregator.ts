@@ -68,9 +68,33 @@ export function aggregateMarketplaceOrders(
 
       // 1. Tính tổng "Tổng số tiền Người mua thanh toán"
       let totalBuyerPaid = 0;
-      for (const r of rows) {
-        if (mapping.buyerPaidCol) {
-          totalBuyerPaid += parseCurrencyVnd(r[mapping.buyerPaidCol]);
+      if (rows.length === 1) {
+        totalBuyerPaid = mapping.buyerPaidCol ? parseCurrencyVnd(rows[0][mapping.buyerPaidCol]) : 0;
+      } else {
+        // Nhiều dòng SKU cho 1 đơn hàng sàn
+        const buyerPaidList = rows.map(r => mapping.buyerPaidCol ? parseCurrencyVnd(r[mapping.buyerPaidCol]) : 0);
+        const nonZeroPaid = buyerPaidList.filter(v => v > 0);
+        const allPaidSame = nonZeroPaid.length > 0 && nonZeroPaid.every(v => v === nonZeroPaid[0]);
+
+        // Kiểm tra nếu có cột giá sản phẩm để phân biệt giá trị dòng vs giá trị toàn đơn
+        let isRepeatedOrderLevelPaid = false;
+        if (allPaidSame && mapping.priceCol) {
+          const itemPrices = rows.map(r => {
+            const p = parseCurrencyVnd(r[mapping.priceCol!]);
+            const q = mapping.quantityCol ? Math.max(1, parseCurrencyVnd(r[mapping.quantityCol!])) : 1;
+            return p * q;
+          });
+          const sumItemPrices = itemPrices.reduce((sum, p) => sum + p, 0);
+          // Nếu số tiền trên mỗi dòng bằng tổng giá của tất cả các dòng cộng lại
+          if (sumItemPrices > 0 && Math.abs(sumItemPrices - nonZeroPaid[0]) < Math.abs(sumItemPrices - (nonZeroPaid[0] * nonZeroPaid.length))) {
+            isRepeatedOrderLevelPaid = true;
+          }
+        }
+
+        if (isRepeatedOrderLevelPaid) {
+          totalBuyerPaid = nonZeroPaid[0];
+        } else {
+          totalBuyerPaid = buyerPaidList.reduce((sum, v) => sum + v, 0);
         }
       }
 
@@ -139,7 +163,7 @@ export function aggregateMarketplaceOrders(
 
 /**
  * Gom nhóm dữ liệu phần mềm bán hàng theo Tên Shop + Số đơn hàng từ hệ thống khác
- * Section 9: Xử lý thông minh trùng lặp, hóa đơn đa dòng, nhiều chứng từ
+ * Xử lý thông minh trùng lặp, hóa đơn đa dòng, nhiều chứng từ
  */
 export function aggregateSalesOrders(
   rows: SalesSoftwareRawRow[],
@@ -194,6 +218,22 @@ export function aggregateSalesOrders(
       if (mapping.voucherNumberCol && r[mapping.voucherNumberCol]) {
         voucherNumbers.add(String(r[mapping.voucherNumberCol]).trim());
       }
+      // Kiểm tra Kênh bán hàng (Section B: Cảnh báo nếu khác Shopee)
+      if (mapping.marketplaceCol && r[mapping.marketplaceCol]) {
+        const channel = String(r[mapping.marketplaceCol]).trim();
+        if (channel && !channel.toLowerCase().includes("shopee")) {
+          const w = `Kênh bán hàng là "${channel}" (khác Shopee)`;
+          if (!warnings.includes(w)) warnings.push(w);
+        }
+      }
+      // Kiểm tra Trạng thái hủy trên PM
+      if (mapping.cancelledCol && r[mapping.cancelledCol]) {
+        const cVal = String(r[mapping.cancelledCol]).trim().toLowerCase();
+        if (cVal.includes("hủy") || cVal.includes("huy") || cVal.includes("cancel") || cVal === "1" || cVal === "true") {
+          const w = "Đơn ghi nhận trạng thái HỦY trên phần mềm bán hàng";
+          if (!warnings.includes(w)) warnings.push(w);
+        }
+      }
     });
 
     let totalAmount = 0;
@@ -205,50 +245,75 @@ export function aggregateSalesOrders(
       // Trường hợp 1: Chỉ có 1 dòng duy nhất
       totalAmount = mapping.totalAmountCol ? parseCurrencyVnd(groupRows[0][mapping.totalAmountCol]) : 0;
     } else {
-      // Trường hợp 2: Có nhiều dòng cho cùng 1 đơn hàng (Section 9)
+      // Trường hợp 2: Có nhiều dòng cho cùng 1 đơn hàng
       const amounts = groupRows.map(r => mapping.totalAmountCol ? parseCurrencyVnd(r[mapping.totalAmountCol]) : 0);
-
-      // Kiểm tra xem có phân tách theo số hóa đơn hoặc số chứng từ không
       const distinctVouchers = Array.from(voucherNumbers).filter(Boolean);
       const distinctInvoices = Array.from(invoiceNumbers).filter(Boolean);
 
-      // Tình huống A: Cùng 1 số chứng từ/hóa đơn, và tổng tiền bị lặp lại y hệt trên các dòng
-      const allAmountsSame = amounts.length > 0 && amounts.every(a => a === amounts[0]);
-
-      if (allAmountsSame && (distinctVouchers.length <= 1 && distinctInvoices.length <= 1)) {
-        // Cùng 1 chứng từ và tổng tiền bị lặp lại trên nhiều dòng chi tiết SKU -> Chỉ lấy 1 lần!
-        totalAmount = amounts[0];
-        isRepeatedAmount = true;
-      } else if (distinctInvoices.length > 1) {
+      if (distinctInvoices.length > 1) {
         // Tình huống B: Có nhiều số hóa đơn thực sự khác nhau -> Gom tổng theo từng hóa đơn DISTINCT
         isMultiInvoice = true;
-        // Group rows by invoice number
-        const invoiceToAmount = new Map<string, number>();
+        const rowsByInvoice = new Map<string, number[]>();
         groupRows.forEach(r => {
           const inv = mapping.invoiceNumberCol ? String(r[mapping.invoiceNumberCol] || "").trim() : "CHUNG";
           const amt = mapping.totalAmountCol ? parseCurrencyVnd(r[mapping.totalAmountCol]) : 0;
-          // Nếu trong cùng hóa đơn tiền bị lặp, lấy 1 lần
-          invoiceToAmount.set(inv, amt);
+          if (!rowsByInvoice.has(inv)) rowsByInvoice.set(inv, []);
+          rowsByInvoice.get(inv)!.push(amt);
         });
-        totalAmount = Array.from(invoiceToAmount.values()).reduce((sum, a) => sum + a, 0);
+
+        totalAmount = 0;
+        for (const [, invAmounts] of rowsByInvoice.entries()) {
+          const nonZero = invAmounts.filter(a => a > 0);
+          if (nonZero.length === 0) continue;
+          const allSame = nonZero.every(a => a === nonZero[0]);
+          if (allSame) {
+            // Tiền lặp lại ở các dòng SKU của cùng 1 hóa đơn -> chỉ lấy 1 lần
+            totalAmount += nonZero[0];
+            if (invAmounts.length > 1) isRepeatedAmount = true;
+          } else {
+            // Các dòng chi tiết của cùng hóa đơn có tiền khác nhau -> cộng dồn
+            totalAmount += invAmounts.reduce((s, a) => s + a, 0);
+          }
+        }
       } else if (distinctVouchers.length > 1) {
         // Tình huống C: Nhiều chứng từ khác nhau
         isMultiInvoice = true;
-        const voucherToAmount = new Map<string, number>();
+        const rowsByVoucher = new Map<string, number[]>();
         groupRows.forEach(r => {
           const v = mapping.voucherNumberCol ? String(r[mapping.voucherNumberCol] || "").trim() : "CHUNG";
           const amt = mapping.totalAmountCol ? parseCurrencyVnd(r[mapping.totalAmountCol]) : 0;
-          voucherToAmount.set(v, amt);
+          if (!rowsByVoucher.has(v)) rowsByVoucher.set(v, []);
+          rowsByVoucher.get(v)!.push(amt);
         });
-        totalAmount = Array.from(voucherToAmount.values()).reduce((sum, a) => sum + a, 0);
+
+        totalAmount = 0;
+        for (const [, vAmounts] of rowsByVoucher.entries()) {
+          const nonZero = vAmounts.filter(a => a > 0);
+          if (nonZero.length === 0) continue;
+          const allSame = nonZero.every(a => a === nonZero[0]);
+          if (allSame) {
+            totalAmount += nonZero[0];
+            if (vAmounts.length > 1) isRepeatedAmount = true;
+          } else {
+            totalAmount += vAmounts.reduce((s, a) => s + a, 0);
+          }
+        }
       } else {
-        // Tình huống D: Các dòng chi tiết có số tiền khác nhau (mỗi dòng là 1 SKU của cùng 1 đơn) -> SUM các dòng
-        // Kiểm tra xem tổng các dòng có hợp lý không
-        const sumAll = amounts.reduce((sum, a) => sum + a, 0);
-        totalAmount = sumAll;
-        if (!allAmountsSame && distinctInvoices.length === 0 && distinctVouchers.length === 0) {
-          isAmbiguous = true;
-          warnings.push("Mã đơn có nhiều dòng chi tiết không kèm số hóa đơn phân biệt - đã tính tổng cộng");
+        // Cùng 1 hóa đơn/chứng từ (hoặc không có số hóa đơn/chứng từ)
+        const nonZero = amounts.filter(a => a > 0);
+        const allAmountsSame = nonZero.length > 0 && nonZero.every(a => a === nonZero[0]);
+
+        if (allAmountsSame) {
+          // Lặp lại cùng 1 số tiền tổng trên nhiều dòng của đơn -> Chỉ lấy 1 lần!
+          totalAmount = nonZero[0];
+          isRepeatedAmount = true;
+        } else {
+          // Các dòng chi tiết có số tiền khác nhau (mỗi dòng 1 sản phẩm) -> SUM
+          totalAmount = amounts.reduce((sum, a) => sum + a, 0);
+          if (distinctInvoices.length === 0 && distinctVouchers.length === 0) {
+            isAmbiguous = true;
+            warnings.push("Mã đơn có nhiều dòng chi tiết không kèm số hóa đơn phân biệt - đã tính tổng cộng");
+          }
         }
       }
     }

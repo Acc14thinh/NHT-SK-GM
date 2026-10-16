@@ -4,7 +4,7 @@
  */
 import * as XLSX from "xlsx";
 import { SalesSoftwareColumnMapping, SalesSoftwareRawRow } from "./types";
-import { findBestMatchingHeader } from "./shopeeParser";
+import { findBestMatchingHeader, findStrictMatchingHeader } from "./shopeeParser";
 import { normalizeOrderId } from "./orderNormalizer";
 import { getSavedHeaderMappings } from "./shopMapper";
 
@@ -30,44 +30,127 @@ export interface ParsedSalesSoftwareResult {
 }
 
 /**
- * Tự động nhận diện cột cho file Phần Mềm Bán Hàng (Ưu tiên mapping đã lưu trước đó)
+ * Kiểm tra xem cột có phải được nhận diện chính xác theo chuẩn Phần Mềm Bán Hàng không (Section B)
+ */
+export function isExactSalesHeader(field: keyof SalesSoftwareColumnMapping, header: string): boolean {
+  if (!header) return false;
+  const hTrim = header.trim();
+  const hLower = hTrim.toLowerCase();
+
+  switch (field) {
+    case "shopNameCol":
+      return hLower === "tên shop" || hLower === "ten shop" || hLower === "cửa hàng" || hLower === "tên cửa hàng";
+    case "orderIdCol":
+      return hLower === "số đơn hàng từ sàn" || hLower === "so don hang tu san" ||
+             hLower === "số đơn hàng từ hệ thống khác" || hLower === "so don hang tu he thong khac" ||
+             hLower === "mã đơn hàng từ hệ thống khác" || hLower === "mã đơn sàn";
+    case "invoiceNumberCol":
+      return hLower === "số hóa đơn" || hLower === "số hoá đơn" || hLower === "số chứng từ" ||
+             hLower === "so hoa don" || hLower === "so chung tu";
+    case "invoiceDateCol":
+      return hLower === "ngày hạch toán" || hLower === "ngay hach toan" ||
+             hLower === "ngày hóa đơn" || hLower === "ngày hoá đơn" || hLower === "ngày chứng từ" ||
+             hLower === "ngay hoa don" || hLower === "ngay chung tu";
+    case "totalAmountCol":
+      return hLower === "tổng tiền thanh toán" || hLower === "tong tien thanh toan" ||
+             hLower === "tổng tiền" || hLower === "tong tien" || hLower === "thành tiền sau thuế" || hLower === "thành tiền";
+    case "voucherNumberCol":
+      return hLower === "số chứng từ" || hLower === "so chung tu" || hLower === "số hóa đơn" || hLower === "so hoa don";
+    case "invoiceDiscountCol":
+      return hLower === "giảm giá hóa đơn" || hLower === "giam gia hoa don" || hLower === "voucher" || hLower === "chiết khấu";
+    case "marketplaceCol":
+      return hLower === "sàn tmđt" || hLower === "san tmdt" || hLower === "kênh bán hàng" || hLower === "kenh ban hang" || hLower === "kênh bán";
+    case "cancelledCol":
+      return hLower === "hủy" || hLower === "huy" || hLower === "trạng thái hủy" || hLower === "trang thai huy" || hLower === "đã hủy";
+    default:
+      return false;
+  }
+}
+
+/**
+ * Tự động nhận diện cột cho file Phần Mềm Bán Hàng theo đúng logic đối chiếu đã kiểm chứng (Section B & Section 5)
  */
 export function autoDetectSalesSoftwareColumns(headers: string[]): SalesSoftwareColumnMapping {
   const saved = getSavedHeaderMappings("sales");
 
-  const getCol = (savedKey: string, keywords: string[]): string => {
+  const getCol = (savedKey: string, exactKeywords: string[], fallbackKeywords: string[] = []): string => {
     if (saved[savedKey] && headers.includes(saved[savedKey])) {
       return saved[savedKey];
     }
-    return findBestMatchingHeader(headers, keywords);
+    return findStrictMatchingHeader(headers, exactKeywords, fallbackKeywords);
   };
 
   return {
+    // KHÓA ĐỐI CHIẾU: Tên Shop (*)
     shopNameCol: getCol("shopNameCol", [
-      "tên shop", "ten shop", "cửa hàng", "tên cửa hàng", "gian hàng", "chi nhánh", "shop", "store"
+      "Tên shop", "Tên Shop", "Tên cửa hàng"
+    ], [
+      "ten shop", "cửa hàng", "gian hàng", "chi nhánh", "shop", "store"
     ]),
+
+    // KHÓA ĐỐI CHIẾU: Mã đơn từ sàn (*) - Ưu tiên "Số đơn hàng từ hệ thống khác"
     orderIdCol: getCol("orderIdCol", [
-      "số đơn hàng từ hệ thống khác", "so don hang tu he thong khac",
-      "mã đơn hàng từ hệ thống khác", "mã đơn hàng", "ma don hang", "mã đơn sàn", "mã đơn", "order id", "số đơn hàng"
+      "Số đơn hàng từ hệ thống khác", "Số đơn hàng từ sàn", "Mã đơn hàng từ hệ thống khác", "Mã đơn từ sàn"
+    ], [
+      "so don hang tu he thong khac", "so don hang tu san", "mã đơn hàng", "ma don hang", "mã đơn sàn", "mã đơn", "order id", "số đơn hàng"
     ]),
+
+    // THÔNG TIN HÓA ĐƠN: Số hóa đơn (*)
     invoiceNumberCol: getCol("invoiceNumberCol", [
-      "số hóa đơn", "so hoa don", "số hđ", "so hd", "hóa đơn số", "invoice no"
+      "Số hóa đơn", "Số chứng từ", "Số hoá đơn"
+    ], [
+      "so hoa don", "so chung tu", "số hđ", "so hd", "hóa đơn số", "invoice no"
     ]),
+
+    // THÔNG TIN HÓA ĐƠN: Ngày hạch toán (*) - Ưu tiên "Ngày hạch toán"
     invoiceDateCol: getCol("invoiceDateCol", [
-      "ngày hóa đơn", "ngay hoa don", "ngày hđ", "ngay hd", "ngày chứng từ", "invoice date"
+      "Ngày hạch toán", "Ngày hóa đơn", "Ngày chứng từ", "Ngày hoá đơn"
+    ], [
+      "ngay hach toan", "ngay hoa don", "ngay chung tu", "ngày hđ", "ngay hd", "invoice date"
     ]),
+
+    // TÍNH DOANH THU: Tổng tiền thanh toán (*) - Ưu tiên "Tổng tiền thanh toán"
     totalAmountCol: getCol("totalAmountCol", [
-      "tổng tiền", "tong tien", "tổng cộng", "thành tiền sau thuế", "thành tiền",
-      "thanh tien", "tổng giá trị thanh toán", "tổng thanh toán", "total amount"
+      "Tổng tiền thanh toán", "Tổng tiền", "Thành tiền sau thuế", "Thành tiền"
+    ], [
+      "tong tien thanh toan", "tong tien", "tổng cộng", "thanh tien", "tổng giá trị thanh toán", "tổng thanh toán", "total amount"
     ]),
+
+    // TÍNH DOANH THU: Giảm giá hóa đơn / Voucher
+    invoiceDiscountCol: getCol("invoiceDiscountCol", [
+      "Giảm giá hóa đơn", "Voucher", "Chiết khấu"
+    ], [
+      "giam gia hoa don", "voucher", "chiet khau", "tiền voucher", "tiền giảm giá"
+    ]),
+
+    // VALIDATION & CANCELLED: Kênh bán hàng (*)
+    marketplaceCol: getCol("marketplaceCol", [
+      "Sàn TMĐT", "Kênh bán hàng", "Kênh bán"
+    ], [
+      "san tmdt", "kenh ban hang", "kênh bán", "sàn giao dịch", "marketplace", "channel"
+    ]),
+
+    // VALIDATION & CANCELLED: Trạng thái hủy
+    cancelledCol: getCol("cancelledCol", [
+      "Hủy", "Trạng thái hủy", "Đã hủy"
+    ], [
+      "huy", "trang thai huy", "da huy", "is cancelled", "cancelled"
+    ]),
+
     voucherNumberCol: getCol("voucherNumberCol", [
-      "số chứng từ", "so chung tu", "số ct", "so ct", "mã chứng từ", "voucher no"
+      "Số chứng từ", "so chung tu", "mã chứng từ"
+    ], [
+      "số ct", "so ct", "voucher no"
     ]),
     customerCol: getCol("customerCol", [
-      "tên khách hàng", "khách hàng", "người mua", "customer"
+      "Tên khách hàng", "Khách hàng"
+    ], [
+      "người mua", "customer"
     ]),
     noteCol: getCol("noteCol", [
-      "ghi chú", "diễn giải", "note", "nội dung"
+      "Ghi chú", "Diễn giải"
+    ], [
+      "note", "nội dung"
     ])
   };
 }

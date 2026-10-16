@@ -42,12 +42,29 @@ export interface MarketplaceColumnMapping {
 export interface SalesSoftwareColumnMapping {
   shopNameCol: string;        // Tên Shop / Cửa hàng (Bắt buộc)
   orderIdCol: string;         // Số đơn hàng từ hệ thống khác / Mã đơn (Bắt buộc)
-  invoiceNumberCol: string;   // Số hóa đơn
-  invoiceDateCol: string;     // Ngày hóa đơn
+  invoiceNumberCol: string;   // Số hóa đơn / Số chứng từ
+  invoiceDateCol: string;     // Ngày hóa đơn / Ngày chứng từ
   totalAmountCol: string;     // Tổng tiền / Thành tiền sau thuế (Bắt buộc)
+  invoiceDiscountCol?: string;// Giảm giá hóa đơn / Voucher
+  marketplaceCol?: string;    // Kênh bán hàng / Sàn TMĐT
+  cancelledCol?: string;      // Trạng thái hủy
   voucherNumberCol?: string;  // Số chứng từ / Mã phiếu
   customerCol?: string;       // Khách hàng
   noteCol?: string;           // Ghi chú
+}
+
+/**
+ * Tính ký tự cột Excel từ index số 0-based (0 -> A, 25 -> Z, 26 -> AA, 28 -> AC, 45 -> AT)
+ */
+export function getColumnLetter(colIndex: number): string {
+  if (colIndex < 0) return "";
+  let letter = "";
+  let temp = colIndex;
+  while (temp >= 0) {
+    letter = String.fromCharCode((temp % 26) + 65) + letter;
+    temp = Math.floor(temp / 26) - 1;
+  }
+  return letter;
 }
 
 /**
