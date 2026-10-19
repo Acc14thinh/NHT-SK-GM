@@ -32,17 +32,19 @@ import {
   ShopMappingEntry,
   getColumnLetter,
   MarketplaceColumnMapping,
-  SalesSoftwareColumnMapping
+  SalesSoftwareColumnMapping,
+  MarketplaceInspectionResult,
+  SalesSoftwareInspectionResult
 } from "../../lib/ecommerce/types";
 import {
-  parseMarketplaceWorkbook,
-  ParsedMarketplaceResult,
+  inspectMarketplaceWorkbook,
+  parseMarketplaceOrdersForReconciliation,
   autoDetectShopeeColumns,
   isExactShopeeHeader
 } from "../../lib/ecommerce/shopeeParser";
 import {
-  parseSalesSoftwareWorkbook,
-  ParsedSalesSoftwareResult,
+  inspectSalesSoftwareWorkbook,
+  parseSalesOrdersForReconciliation,
   autoDetectSalesSoftwareColumns,
   isExactSalesHeader
 } from "../../lib/ecommerce/salesSoftwareParser";
@@ -51,10 +53,6 @@ import {
   saveShopMappings,
   saveHeaderMappings
 } from "../../lib/ecommerce/shopMapper";
-import {
-  aggregateMarketplaceOrders,
-  aggregateSalesOrders
-} from "../../lib/ecommerce/aggregator";
 import { reconcileEcommerceRevenue } from "../../lib/ecommerce/reconciliationEngine";
 import { exportEcommerceReconciliationExcel } from "../../lib/ecommerce/excelExporter";
 import { generateDemoEcommerceWorkbooks } from "../../lib/ecommerce/mockEcommerceData";
@@ -74,10 +72,16 @@ export const EcommerceReconciliationView: React.FC = () => {
   const [mappingModalTab, setMappingModalTab] = useState<"shopee" | "sales">("shopee");
   const [showShopMappingModal, setShowShopMappingModal] = useState<boolean>(false);
 
-  // Files & Parsed data
-  const [marketplaceResult, setMarketplaceResult] = useState<ParsedMarketplaceResult | null>(null);
-  const [salesResult, setSalesResult] = useState<ParsedSalesSoftwareResult | null>(null);
+  // Files & Parsed data (Chỉ giữ metadata nhẹ trong state, KHÔNG giữ mảng hàng chục nghìn rows)
+  const [marketplaceResult, setMarketplaceResult] = useState<MarketplaceInspectionResult | null>(null);
+  const [salesResult, setSalesResult] = useState<SalesSoftwareInspectionResult | null>(null);
   const [shopMappings, setShopMappings] = useState<ShopMappingEntry[]>([]);
+
+  // References giữ file gốc và workbook demo tạm thời để Phase 2 xử lý
+  const mktFileRef = useRef<File | null>(null);
+  const salesFileRef = useRef<File | null>(null);
+  const mktDemoWbRef = useRef<XLSX.WorkBook | null>(null);
+  const salesDemoWbRef = useRef<XLSX.WorkBook | null>(null);
 
   // Reconciliation processing & progress (Section 40)
   const [isProcessing, setIsProcessing] = useState<boolean>(false);
@@ -102,32 +106,16 @@ export const EcommerceReconciliationView: React.FC = () => {
     setTimeout(() => setToastMessage(null), 3500);
   };
 
-  // Xem trước giá trị mẫu 3-5 dòng cho cột được chọn trong file Shopee
+  // Xem trước giá trị mẫu 3-5 dòng cho cột được chọn trong file Shopee (Lấy trực tiếp từ previewValuesByCol)
   const getShopeePreviewValues = (colName: string): string[] => {
-    if (!colName || !marketplaceResult?.sheets[0]?.rows) return [];
-    const vals: string[] = [];
-    for (const r of marketplaceResult.sheets[0].rows) {
-      const v = r[colName];
-      if (v !== undefined && v !== null && String(v).trim() !== "") {
-        vals.push(String(v));
-        if (vals.length >= 4) break;
-      }
-    }
-    return vals;
+    if (!colName || !marketplaceResult?.sheets[0]?.previewValuesByCol) return [];
+    return marketplaceResult.sheets[0].previewValuesByCol[colName] || [];
   };
 
   // Xem trước giá trị mẫu 3-5 dòng cho cột được chọn trong file Phần Mềm Bán Hàng
   const getSalesPreviewValues = (colName: string): string[] => {
-    if (!colName || !salesResult?.rows) return [];
-    const vals: string[] = [];
-    for (const r of salesResult.rows) {
-      const v = r[colName];
-      if (v !== undefined && v !== null && String(v).trim() !== "") {
-        vals.push(String(v));
-        if (vals.length >= 4) break;
-      }
-    }
-    return vals;
+    if (!colName || !salesResult?.previewValuesByCol) return [];
+    return salesResult.previewValuesByCol[colName] || [];
   };
 
   // Cập nhật trường mapping cho file Shopee (đồng bộ trên tất cả các sheet trong workbook)
@@ -194,8 +182,9 @@ export const EcommerceReconciliationView: React.FC = () => {
 
   // Trạng thái kiểm tra 6 cột File Sàn Shopee (Section 1, 3, 4)
   const shopeeChecks = useMemo(() => {
-    if (!marketplaceResult || !marketplaceResult.sheets[0]) return null;
+    if (!marketplaceResult || !marketplaceResult.sheets || !marketplaceResult.sheets[0]) return null;
     const m = marketplaceResult.sheets[0].detectedMapping;
+    if (!m) return null;
     const items = [
       {
         key: "orderIdCol",
@@ -243,7 +232,7 @@ export const EcommerceReconciliationView: React.FC = () => {
 
   // Trạng thái kiểm tra 6 cột File Phần Mềm Bán Hàng (Section 1, 5)
   const salesChecks = useMemo(() => {
-    if (!salesResult) return null;
+    if (!salesResult || !salesResult.detectedMapping) return null;
     const m = salesResult.detectedMapping;
     const items = [
       {
@@ -291,8 +280,8 @@ export const EcommerceReconciliationView: React.FC = () => {
   useEffect(() => {
     if (marketplaceResult && salesResult) {
       const proposed = buildProposedShopMappings(
-        marketplaceResult.allDetectedShopNames,
-        salesResult.detectedShops
+        marketplaceResult.allDetectedShopNames || [],
+        salesResult.detectedShops || []
       );
       setShopMappings(proposed);
     }
@@ -305,7 +294,7 @@ export const EcommerceReconciliationView: React.FC = () => {
     }
 
     // 1. Kiểm tra các cột bắt buộc trên file Shopee
-    const shopeeMapping = marketplaceResult.sheets[0]?.detectedMapping;
+    const shopeeMapping = marketplaceResult.sheets?.[0]?.detectedMapping;
     if (!shopeeMapping?.orderIdCol) {
       return {
         isReady: false,
@@ -329,21 +318,21 @@ export const EcommerceReconciliationView: React.FC = () => {
     }
 
     // 2. Kiểm tra các cột bắt buộc trên file Phần mềm bán hàng
-    if (!salesResult.detectedMapping.shopNameCol) {
+    if (!salesResult.detectedMapping?.shopNameCol) {
       return {
         isReady: false,
         blockingError: "Chưa cấu hình cột [Tên Shop] trong file phần mềm bán hàng.",
         actionType: "column_sales" as const
       };
     }
-    if (!salesResult.detectedMapping.orderIdCol) {
+    if (!salesResult.detectedMapping?.orderIdCol) {
       return {
         isReady: false,
         blockingError: "Chưa cấu hình cột [Mã đơn từ sàn] trong file phần mềm bán hàng.",
         actionType: "column_sales" as const
       };
     }
-    if (!salesResult.detectedMapping.totalAmountCol) {
+    if (!salesResult.detectedMapping?.totalAmountCol) {
       return {
         isReady: false,
         blockingError: "Chưa cấu hình cột [Tổng tiền] trong file phần mềm bán hàng.",
@@ -353,7 +342,7 @@ export const EcommerceReconciliationView: React.FC = () => {
 
     // 3. Kiểm tra ghép Shop
     if (
-      marketplaceResult.sheets.length > 1 &&
+      (marketplaceResult.sheets?.length || 0) > 1 &&
       shopMappings.length > 0 &&
       shopMappings.some(m => !m.salesShopName)
     ) {
@@ -368,43 +357,54 @@ export const EcommerceReconciliationView: React.FC = () => {
   }, [marketplaceResult, salesResult, shopMappings]);
 
   // Xử lý nạp File Sàn Shopee (Tự động phân tích ngầm ngay khi chọn file)
+  // Xử lý nạp File Sàn TMĐT (PHASE 1: Lightweight inspection chỉ 25 dòng đầu, cực nhanh, không tốn RAM)
   const handleMarketplaceFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    // Lưu reference file gốc (0 MB heap overhead)
+    mktFileRef.current = file;
+    mktDemoWbRef.current = null;
+
     const reader = new FileReader();
     reader.onload = (evt) => {
       try {
-        const buffer = evt.target?.result;
-        const wb = XLSX.read(buffer, { type: "array" });
-        const parsed = parseMarketplaceWorkbook(wb, file.name);
-        setMarketplaceResult(parsed);
+        const buffer = evt.target?.result as ArrayBuffer;
+        // Đọc chỉ 25 dòng đầu tiên để lấy sheetNames, headers, platform và preview
+        const lightWb = XLSX.read(buffer, { type: "array", sheetRows: 25 });
+        const inspected = inspectMarketplaceWorkbook(lightWb, file.name, file.size);
+        setMarketplaceResult(inspected);
         setReconciliationRecords(null);
-        showToast(`Đã nhận diện file Shopee: ${parsed.totalRows.toLocaleString()} dòng – ${parsed.sheets.length} shop`);
+        showToast(`Đã nhận diện file sàn TMĐT: ${inspected.sheets.length} shop/sheet`);
       } catch (err) {
-        console.error(err);
+        console.error("[UPLOAD MKT ERROR]", err);
         showToast("Lỗi khi đọc file sàn TMĐT. Vui lòng kiểm tra định dạng Excel.", "warning");
       }
     };
     reader.readAsArrayBuffer(file);
   };
 
-  // Xử lý nạp File Phần Mềm Bán Hàng (Tự động phân tích ngầm ngay khi chọn file)
+  // Xử lý nạp File Phần Mềm Bán Hàng (PHASE 1: Lightweight inspection chỉ 25 dòng đầu)
   const handleSalesFileChange = (e: React.ChangeEvent<HTMLInputElement>) => {
     const file = e.target.files?.[0];
     if (!file) return;
 
+    // Lưu reference file gốc
+    salesFileRef.current = file;
+    salesDemoWbRef.current = null;
+
     const reader = new FileReader();
     reader.onload = (evt) => {
       try {
-        const buffer = evt.target?.result;
-        const wb = XLSX.read(buffer, { type: "array" });
-        const parsed = parseSalesSoftwareWorkbook(wb, file.name);
-        setSalesResult(parsed);
+        const buffer = evt.target?.result as ArrayBuffer;
+        // Đọc chỉ 25 dòng đầu tiên để lấy headers, mapping và preview
+        const lightWb = XLSX.read(buffer, { type: "array", sheetRows: 25 });
+        const inspected = inspectSalesSoftwareWorkbook(lightWb, file.name, file.size);
+        setSalesResult(inspected);
         setReconciliationRecords(null);
-        showToast(`Đã nhận diện file bán hàng: ${parsed.rows.length.toLocaleString()} dòng – ${parsed.detectedShops.length} shop`);
+        showToast(`Đã nhận diện file bán hàng: ${inspected.detectedShops.length} shop`);
       } catch (err) {
-        console.error(err);
+        console.error("[UPLOAD SALES ERROR]", err);
         showToast("Lỗi khi đọc file phần mềm bán hàng.", "warning");
       }
     };
@@ -413,9 +413,14 @@ export const EcommerceReconciliationView: React.FC = () => {
 
   // 1-Click Nạp Dữ Liệu Demo Mẫu (14 trường hợp nghiệp vụ)
   const handleLoadDemoData = () => {
+    mktFileRef.current = null;
+    salesFileRef.current = null;
     const { shopeeWorkbook, shopeeFileName, salesWorkbook, salesFileName } = generateDemoEcommerceWorkbooks();
-    const parsedM = parseMarketplaceWorkbook(shopeeWorkbook, shopeeFileName);
-    const parsedS = parseSalesSoftwareWorkbook(salesWorkbook, salesFileName);
+    mktDemoWbRef.current = shopeeWorkbook;
+    salesDemoWbRef.current = salesWorkbook;
+
+    const parsedM = inspectMarketplaceWorkbook(shopeeWorkbook, shopeeFileName);
+    const parsedS = inspectSalesSoftwareWorkbook(salesWorkbook, salesFileName);
 
     setMarketplaceResult(parsedM);
     setSalesResult(parsedS);
@@ -429,7 +434,7 @@ export const EcommerceReconciliationView: React.FC = () => {
     showToast("Đã nạp thành công bộ file mẫu Shopee & Phần mềm bán hàng!", "info");
   };
 
-  // BƯỚC 2: Thực hiện đối chiếu (Có hiển thị tiến trình theo Section 40)
+  // BƯỚC 2: Thực hiện đối chiếu (PHASE 2: FULL PROCESSING CHỌN LỌC)
   const handleExecuteReconciliation = () => {
     if (!marketplaceResult || !salesResult) {
       showToast("Vui lòng tải lên cả 2 file trước khi đối chiếu!", "warning");
@@ -442,33 +447,59 @@ export const EcommerceReconciliationView: React.FC = () => {
     }
 
     setIsProcessing(true);
-    setProcessingProgress("Đang khởi tạo index Shop + Mã đơn...");
+    setProcessingProgress("Đang chuẩn bị nạp dữ liệu đối chiếu...");
 
-    setTimeout(() => {
+    setTimeout(async () => {
       try {
         saveShopMappings(shopMappings);
 
-        const totalOrdersEstimate = marketplaceResult.totalUniqueOrders + salesResult.diagnostics.uniqueOrderCount;
-        setProcessingProgress(`Đang xử lý ${totalOrdersEstimate.toLocaleString()} đơn hàng hai chiều...`);
+        // 1. Nạp và trích xuất chọn lọc dữ liệu Sàn TMĐT
+        setProcessingProgress("Đang đọc & trích xuất cột dữ liệu sàn TMĐT...");
+        let mktWb: XLSX.WorkBook;
+        if (mktFileRef.current) {
+          const mktBuf = await mktFileRef.current.arrayBuffer();
+          mktWb = XLSX.read(mktBuf, { type: "array" });
+        } else if (mktDemoWbRef.current) {
+          mktWb = mktDemoWbRef.current;
+        } else {
+          throw new Error("Không tìm thấy tệp sàn TMĐT.");
+        }
 
-        // 1. Group dữ liệu sàn theo Shop + Order ID
-        const aggregatedMarketplace = aggregateMarketplaceOrders(
+        const aggregatedMarketplace = parseMarketplaceOrdersForReconciliation(
+          mktWb,
           marketplaceResult.sheets,
           shopMappings
         );
 
-        // 2. Group dữ liệu bán hàng theo Shop + Order ID
-        const aggregatedSales = aggregateSalesOrders(
-          salesResult.rows,
+        // 2. Nạp và trích xuất chọn lọc dữ liệu Phần Mềm Bán Hàng
+        setProcessingProgress("Đang đọc & trích xuất cột dữ liệu phần mềm bán hàng...");
+        let salesWb: XLSX.WorkBook;
+        if (salesFileRef.current) {
+          const salesBuf = await salesFileRef.current.arrayBuffer();
+          salesWb = XLSX.read(salesBuf, { type: "array" });
+        } else if (salesDemoWbRef.current) {
+          salesWb = salesDemoWbRef.current;
+        } else {
+          throw new Error("Không tìm thấy tệp phần mềm bán hàng.");
+        }
+
+        const aggregatedSales = parseSalesOrdersForReconciliation(
+          salesWb,
+          salesResult.sheetName,
           salesResult.detectedMapping
         );
 
-        // 3. Thực hiện đối chiếu 2 chiều deterministic O(n)
+        // 3. Thực hiện đối chiếu 2 chiều O(1) Map lookup
+        setProcessingProgress("Đang thực hiện đối chiếu doanh thu 2 chiều...");
         const { records, summary } = reconcileEcommerceRevenue(
           aggregatedMarketplace,
           aggregatedSales,
           config
         );
+
+        // 4. Giải phóng bộ nhớ tạm ngay lập tức
+        aggregatedMarketplace.clear();
+        aggregatedSales.clear();
 
         setReconciliationRecords(records);
         setReconciliationSummary(summary);
@@ -476,12 +507,12 @@ export const EcommerceReconciliationView: React.FC = () => {
         setProcessingProgress("");
         showToast(`Đối chiếu hoàn tất: ${summary.matchedCount} đơn khớp, ${summary.differenceCount} đơn chênh lệch!`);
       } catch (err: any) {
-        console.error(err);
+        console.error("[RECONCILIATION ERROR]", err);
         setIsProcessing(false);
         setProcessingProgress("");
         showToast(`Lỗi trong quá trình đối chiếu: ${err.message || err}`, "warning");
       }
-    }, 400);
+    }, 40);
   };
 
   // BƯỚC 3: Xuất kết quả Excel đa sheet
@@ -499,8 +530,12 @@ export const EcommerceReconciliationView: React.FC = () => {
     showToast("Đã tải xuống file Excel đối chiếu doanh thu đa sheet!");
   };
 
-  // Làm mới (Xóa 2 file & kết quả hiện tại, giữ nguyên mapping đã lưu trong localStorage - Section 43)
+  // Làm mới (Xóa 2 file & giải phóng memory, giữ nguyên mapping đã lưu trong localStorage - Section 43)
   const handleReset = () => {
+    mktFileRef.current = null;
+    salesFileRef.current = null;
+    mktDemoWbRef.current = null;
+    salesDemoWbRef.current = null;
     setMarketplaceResult(null);
     setSalesResult(null);
     setShopMappings([]);
@@ -511,7 +546,7 @@ export const EcommerceReconciliationView: React.FC = () => {
     setSearchQuery("");
     if (mktFileInputRef.current) mktFileInputRef.current.value = "";
     if (salesFileInputRef.current) salesFileInputRef.current.value = "";
-    showToast("Đã làm mới phiên đối chiếu.", "info");
+    showToast("Đã làm mới phiên đối chiếu và giải phóng bộ nhớ.", "info");
   };
 
   // Danh sách các shop xuất hiện trong kết quả
@@ -738,12 +773,12 @@ export const EcommerceReconciliationView: React.FC = () => {
                     </div>
                     <p className="text-[11px] text-amber-800 font-medium">Vui lòng chọn:</p>
                     <select
-                      value={marketplaceResult.sheets[0]?.detectedMapping.buyerPaidCol || ""}
+                      value={marketplaceResult.sheets[0]?.detectedMapping?.buyerPaidCol || ""}
                       onChange={(e) => handleUpdateShopeeMapping("buyerPaidCol", e.target.value)}
                       className="w-full border-2 border-black p-2 text-xs font-mono font-bold bg-white cursor-pointer"
                     >
                       <option value="">-- Chọn cột tiền người mua thanh toán --</option>
-                      {marketplaceResult.sheets[0]?.headers.map((h, idx) => (
+                      {marketplaceResult.sheets[0]?.headers?.map((h, idx) => (
                         <option key={h} value={h}>
                           {getColumnLetter(idx)} — {h}
                         </option>
@@ -809,7 +844,7 @@ export const EcommerceReconciliationView: React.FC = () => {
                     {salesResult.fileName}
                   </div>
                   <div className="text-[11px] text-green-800 font-bold font-mono">
-                    ✓ {salesResult.rows.length.toLocaleString()} dòng – {salesResult.detectedShops.length} shop
+                    ✓ {(salesResult.totalRows || salesResult.rows?.length || 0).toLocaleString()} dòng – {salesResult.detectedShops.length} shop
                   </div>
                 </div>
               ) : (
@@ -869,7 +904,7 @@ export const EcommerceReconciliationView: React.FC = () => {
                 </div>
 
                 {/* Nếu thiếu cột bắt buộc */}
-                {(!salesResult.detectedMapping.shopNameCol || !salesResult.detectedMapping.orderIdCol || !salesResult.detectedMapping.totalAmountCol) && (
+                {(!salesResult.detectedMapping?.shopNameCol || !salesResult.detectedMapping?.orderIdCol || !salesResult.detectedMapping?.totalAmountCol) && (
                   <div className="p-2 bg-amber-50 border-2 border-amber-400 text-xs space-y-1 rounded">
                     <div className="flex items-center gap-1 font-black text-amber-900 text-[11px]">
                       <AlertTriangle size={13} className="text-amber-700" />
@@ -913,8 +948,8 @@ export const EcommerceReconciliationView: React.FC = () => {
                     <span>Sẵn sàng đối chiếu doanh thu</span>
                   </div>
                   <div className="text-[11px] text-slate-700 font-mono">
-                    ✓ File Shopee: {marketplaceResult.totalRows.toLocaleString()} dòng ({marketplaceResult.sheets.length} shop) •
-                    ✓ File bán hàng: {salesResult.rows.length.toLocaleString()} dòng ({salesResult.detectedShops.length} shop) •
+                    ✓ File sàn TMĐT: {marketplaceResult.totalRows.toLocaleString()} dòng ({marketplaceResult.sheets.length} shop) •
+                    ✓ File bán hàng: {(salesResult.totalRows || salesResult.rows?.length || 0).toLocaleString()} dòng ({salesResult.detectedShops.length} shop) •
                     ✓ Đã nhận diện đủ cột bắt buộc
                   </div>
                   <div className="flex flex-wrap items-center gap-3 pt-1">

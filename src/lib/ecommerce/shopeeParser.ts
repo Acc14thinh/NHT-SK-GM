@@ -179,20 +179,63 @@ export function autoDetectShopeeColumns(headers: string[]): MarketplaceColumnMap
 }
 
 /**
- * Phân tích workbook của sàn TMĐT
+ * Tự động nhận diện loại sàn TMĐT từ danh sách headers
  */
-export function parseMarketplaceWorkbook(
+export function detectMarketplacePlatform(headers: string[]): "SHOPEE" | "TIKTOK" | "OTHER" {
+  if (!headers || headers.length === 0) return "SHOPEE";
+  const hLower = headers.map(h => String(h || "").toLowerCase().trim());
+  const hasTikTok = hLower.some(h =>
+    h === "order id" ||
+    h.includes("sku subtotal") ||
+    h.includes("seller discount") ||
+    h.includes("cancelation/return") ||
+    h.includes("cancellation/return") ||
+    h.includes("order refund amount")
+  );
+  if (hasTikTok) return "TIKTOK";
+
+  return "SHOPEE";
+}
+
+/**
+ * Tự động nhận diện cấu hình cột cho TikTok Shop
+ */
+export function autoDetectTikTokColumns(headers: string[]): MarketplaceColumnMapping {
+  const getCol = (exactKeywords: string[], fallbackKeywords: string[] = []): string => {
+    return findStrictMatchingHeader(headers, exactKeywords, fallbackKeywords);
+  };
+
+  return {
+    orderIdCol: getCol(["Order ID", "order id", "OrderID"], ["mã đơn", "order_id"]),
+    orderStatusCol: getCol(["Order Status", "order status"], ["trạng thái đơn"]),
+    deliveryTimeCol: getCol(["Delivered Time", "delivered time", "Delivery Time"], ["thời gian giao hàng", "created time"]),
+    returnRefundCol: getCol(["Cancelation/Return Type", "Cancellation/Return Type", "Cancelation Type"], ["return", "refund", "trả hàng"]),
+    buyerPaidCol: getCol(["SKU Subtotal Before Discount", "Subtotal Before Discount"], ["subtotal", "tổng tiền", "tiền hàng"]),
+    shopVoucherCol: getCol(["SKU Seller Discount", "Seller Discount"], ["seller discount", "giảm giá"]),
+    quantityCol: getCol(["Quantity", "quantity"], ["số lượng"]),
+    skuCol: getCol(["SKU ID", "Seller SKU", "Product Name"], ["sku", "tên sản phẩm"]),
+    tiktokCancelReturnCol: getCol(["Cancelation/Return Type", "Cancellation/Return Type"], []),
+    tiktokSellerDiscountCol: getCol(["SKU Seller Discount"], []),
+    tiktokSubtotalCol: getCol(["SKU Subtotal Before Discount"], [])
+  };
+}
+
+/**
+ * PHASE 1: LIGHTWEIGHT INSPECTION
+ * Chỉ đọc tối đa 25 dòng đầu tiên để lấy sheet list, headers, platform, và sample preview.
+ * Tuyệt đối không convert toàn bộ file thành JSON hay lưu raw rows vào React state.
+ */
+export function inspectMarketplaceWorkbook(
   workbook: XLSX.WorkBook,
   fileName: string,
+  fileSize: number = 0,
   customMapping?: Partial<MarketplaceColumnMapping>
-): ParsedMarketplaceResult {
-  const sheets: ParsedMarketplaceSheet[] = [];
-  const warnings: string[] = [];
-  let totalRowsAcrossSheets = 0;
-  const allUniqueOrdersSet = new Set<string>();
+): import("./types").MarketplaceInspectionResult {
+  const sheets: import("./types").MarketplaceSheetInspection[] = [];
+  const allDetectedShopNames: string[] = [];
+  let totalApproxRows = 0;
 
   for (const sheetName of workbook.SheetNames) {
-    // Bỏ qua các sheet ẩn hoặc sheet metadata không liên quan
     if (sheetName.toLowerCase().startsWith("__") || sheetName.toLowerCase().includes("readme")) {
       continue;
     }
@@ -200,16 +243,27 @@ export function parseMarketplaceWorkbook(
     const worksheet = workbook.Sheets[sheetName];
     if (!worksheet) continue;
 
-    // Đọc dạng mảng các dòng (raw 2D array)
+    // Approximate row count từ range !ref (nếu có)
+    let approxRowCount = 0;
+    if (worksheet["!ref"]) {
+      try {
+        const decoded = XLSX.utils.decode_range(worksheet["!ref"]);
+        approxRowCount = Math.max(0, decoded.e.r - decoded.s.r);
+      } catch {
+        approxRowCount = 0;
+      }
+    }
+
+    // Đọc tối đa 25 dòng đầu
     const rawData: any[][] = XLSX.utils.sheet_to_json(worksheet, {
       header: 1,
       defval: "",
-      raw: false // ép chuỗi để không bị scientific notation
+      raw: false
     });
 
     if (!rawData || rawData.length === 0) continue;
 
-    // Tìm dòng header (dòng có chứa "Mã đơn hàng" hoặc điểm số header cao nhất)
+    // Tìm dòng header (quét trong 10 dòng đầu)
     let headerRowIdx = -1;
     for (let r = 0; r < Math.min(10, rawData.length); r++) {
       const rowStr = (rawData[r] || []).map(cell => String(cell || "").toLowerCase()).join(" ");
@@ -221,104 +275,305 @@ export function parseMarketplaceWorkbook(
         rowStr.includes("order_sn") ||
         rowStr.includes("ordersn") ||
         rowStr.includes("người mua thanh toán") ||
-        rowStr.includes("buyer paid") ||
-        rowStr.includes("tổng số tiền")
+        rowStr.includes("sku subtotal")
       ) {
         headerRowIdx = r;
         break;
       }
     }
-
-    if (headerRowIdx === -1) {
-      // Fallback lấy dòng 0 nếu có dữ liệu
-      headerRowIdx = 0;
-    }
+    if (headerRowIdx === -1) headerRowIdx = 0;
 
     const rawHeaders: string[] = (rawData[headerRowIdx] || []).map((h: any, idx: number) => {
       const s = String(h || "").trim();
       return s || `Cột_${idx + 1}`;
     });
 
-    // Detect mapping
-    const detected = autoDetectShopeeColumns(rawHeaders);
-    const finalMapping: MarketplaceColumnMapping = {
-      ...detected,
-      ...customMapping
-    };
+    const platform = detectMarketplacePlatform(rawHeaders);
 
-    if (!finalMapping.orderIdCol) {
-      warnings.push(`Sheet "${sheetName}": Không tự động nhận diện được cột Mã đơn hàng.`);
+    let detectedMapping = platform === "TIKTOK"
+      ? autoDetectTikTokColumns(rawHeaders)
+      : autoDetectShopeeColumns(rawHeaders);
+
+    if (customMapping) {
+      detectedMapping = { ...detectedMapping, ...customMapping };
     }
 
-    // Đọc các dòng dữ liệu sau header
-    const rows: MarketplaceRawRow[] = [];
-    const seenOrdersInSheet = new Set<string>();
-    let rowsWithOrderId = 0;
-    let rowsMissingOrderId = 0;
-    let duplicateOrdersInSheet = 0;
-
-    for (let r = headerRowIdx + 1; r < rawData.length; r++) {
-      const rowData = rawData[r];
-      if (!rowData || rowData.length === 0) continue;
-
-      // Kiểm tra dòng có toàn chuỗi rỗng không
-      const hasContent = rowData.some(cell => cell !== null && cell !== undefined && String(cell).trim() !== "");
-      if (!hasContent) continue;
-
-      const rowObj: MarketplaceRawRow = {};
-      rawHeaders.forEach((h, colIdx) => {
-        rowObj[h] = rowData[colIdx] !== undefined ? rowData[colIdx] : "";
-      });
-
-      const orderIdVal = finalMapping.orderIdCol ? rowObj[finalMapping.orderIdCol] : "";
-      const { normalized } = normalizeOrderId(orderIdVal);
-
-      if (normalized) {
-        rowsWithOrderId++;
-        if (seenOrdersInSheet.has(normalized)) {
-          duplicateOrdersInSheet++;
-        } else {
-          seenOrdersInSheet.add(normalized);
+    // Trích xuất 3-5 mẫu preview cho từng cột
+    const previewValuesByCol: Record<string, string[]> = {};
+    for (let c = 0; c < rawHeaders.length; c++) {
+      const h = rawHeaders[c];
+      const samples: string[] = [];
+      for (let r = headerRowIdx + 1; r < rawData.length; r++) {
+        const val = rawData[r]?.[c];
+        if (val !== undefined && val !== null && String(val).trim() !== "") {
+          samples.push(String(val).trim());
+          if (samples.length >= 4) break;
         }
-        allUniqueOrdersSet.add(`${sheetName}::${normalized}`);
-      } else {
-        rowsMissingOrderId++;
       }
-
-      rows.push(rowObj);
+      previewValuesByCol[h] = samples;
     }
-
-    if (workbook.SheetNames.length > 1 && rows.length === 0) {
-      continue;
-    }
-
-    totalRowsAcrossSheets += rows.length;
 
     sheets.push({
       sheetName,
-      rowCount: rows.length,
+      platform,
       headers: rawHeaders,
-      headerRowIndex: headerRowIdx,
-      detectedMapping: finalMapping,
-      rows,
-      diagnostics: {
-        totalRows: rows.length,
-        rowsWithOrderId,
-        rowsMissingOrderId,
-        uniqueOrderCount: seenOrdersInSheet.size,
-        duplicateOrderCount: duplicateOrdersInSheet
-      }
+      detectedMapping,
+      previewValuesByCol,
+      approxRowCount: Math.max(approxRowCount, rawData.length - headerRowIdx - 1)
     });
+
+    totalApproxRows += approxRowCount;
+    allDetectedShopNames.push(sheetName);
   }
 
-  const allDetectedShopNames = sheets.map(s => s.sheetName);
+  return {
+    fileName,
+    fileSize,
+    sheets,
+    allDetectedShopNames,
+    totalApproxRows,
+    totalRows: totalApproxRows
+  };
+}
+
+/**
+ * PHASE 2: FULL PROCESSING (Chỉ chạy khi bấm [TIẾN HÀNH ĐỐI CHIẾU])
+ * Trích xuất có chọn lọc CHỈ các cột tham gia đối chiếu, gom nhóm trực tiếp,
+ * giải phóng bộ nhớ ngay sau mỗi sheet, không lưu raw row bloat.
+ */
+export function parseMarketplaceOrdersForReconciliation(
+  workbook: XLSX.WorkBook,
+  inspectedSheets: import("./types").MarketplaceSheetInspection[],
+  shopMappings: import("./types").ShopMappingEntry[]
+): Map<string, import("./types").AggregatedMarketplaceOrder> {
+  const { normalizeOrderId, normalizeShopName, parseCurrencyVnd } = require("./orderNormalizer");
+  const resultMap = new Map<string, import("./types").AggregatedMarketplaceOrder>();
+
+  // Map sheet -> targetSalesShop
+  const sheetToSalesShopMap = new Map<string, string>();
+  shopMappings.forEach(m => {
+    sheetToSalesShopMap.set(m.marketplaceSheetOrShop, m.salesShopName || m.marketplaceSheetOrShop);
+  });
+
+  for (const sheetInfo of inspectedSheets) {
+    const sheetName = sheetInfo.sheetName;
+    const worksheet = workbook.Sheets[sheetName];
+    if (!worksheet) continue;
+
+    const targetSalesShop = sheetToSalesShopMap.get(sheetName) || sheetName;
+    const normShopKey = normalizeShopName(targetSalesShop);
+    const mapping = sheetInfo.detectedMapping;
+    if (!mapping.orderIdCol) continue;
+
+    // Đọc raw 2D array của sheet này
+    const rawData: any[][] = XLSX.utils.sheet_to_json(worksheet, {
+      header: 1,
+      defval: "",
+      raw: false
+    });
+    if (!rawData || rawData.length === 0) continue;
+
+    // Tìm header row
+    let headerRowIdx = 0;
+    for (let r = 0; r < Math.min(10, rawData.length); r++) {
+      const rowStr = (rawData[r] || []).map(cell => String(cell || "").toLowerCase()).join(" ");
+      if (
+        rowStr.includes("mã đơn") ||
+        rowStr.includes("order id") ||
+        rowStr.includes("người mua thanh toán") ||
+        rowStr.includes("sku subtotal")
+      ) {
+        headerRowIdx = r;
+        break;
+      }
+    }
+
+    const headers: string[] = (rawData[headerRowIdx] || []).map((h: any, idx: number) => String(h || "").trim() || `Cột_${idx + 1}`);
+
+    // Xác định index của các cột cần thiết
+    const orderIdIdx = headers.indexOf(mapping.orderIdCol);
+    const statusIdx = mapping.orderStatusCol ? headers.indexOf(mapping.orderStatusCol) : -1;
+    const deliveryIdx = mapping.deliveryTimeCol ? headers.indexOf(mapping.deliveryTimeCol) : -1;
+    const returnRefundIdx = mapping.returnRefundCol ? headers.indexOf(mapping.returnRefundCol) : -1;
+    const buyerPaidIdx = mapping.buyerPaidCol ? headers.indexOf(mapping.buyerPaidCol) : -1;
+    const shopVoucherIdx = mapping.shopVoucherCol ? headers.indexOf(mapping.shopVoucherCol) : -1;
+    const skuIdx = mapping.skuCol ? headers.indexOf(mapping.skuCol) : -1;
+    const priceIdx = mapping.priceCol ? headers.indexOf(mapping.priceCol) : -1;
+    const quantityIdx = mapping.quantityCol ? headers.indexOf(mapping.quantityCol) : -1;
+
+    if (orderIdIdx === -1) continue;
+
+    const isTikTok = sheetInfo.platform === "TIKTOK";
+
+    // Gom đơn tạm thời cho sheet này
+    interface ExtractedRowItem {
+      rawOrderId: string;
+      orderStatus: string;
+      deliveryDate: string;
+      returnRefund: string;
+      buyerPaid: number;
+      voucher: number;
+      productName: string;
+      price: number;
+      quantity: number;
+    }
+
+    const orderGroups = new Map<string, ExtractedRowItem[]>();
+
+    for (let r = headerRowIdx + 1; r < rawData.length; r++) {
+      const row = rawData[r];
+      if (!row || row.length === 0) continue;
+
+      const rawOrderId = String(row[orderIdIdx] || "").trim();
+      const { normalized } = normalizeOrderId(rawOrderId);
+      if (!normalized) continue;
+
+      const orderStatus = statusIdx >= 0 ? String(row[statusIdx] || "").trim() : "";
+      const deliveryDate = deliveryIdx >= 0 ? String(row[deliveryIdx] || "").trim() : "";
+      const returnRefund = returnRefundIdx >= 0 ? String(row[returnRefundIdx] || "").trim() : "";
+      const buyerPaid = buyerPaidIdx >= 0 ? parseCurrencyVnd(row[buyerPaidIdx]) : 0;
+      const voucher = shopVoucherIdx >= 0 ? parseCurrencyVnd(row[shopVoucherIdx]) : 0;
+      const productName = skuIdx >= 0 ? String(row[skuIdx] || "").trim() : "";
+      const price = priceIdx >= 0 ? parseCurrencyVnd(row[priceIdx]) : buyerPaid;
+      const quantity = quantityIdx >= 0 ? Math.max(1, parseCurrencyVnd(row[quantityIdx])) : 1;
+
+      if (!orderGroups.has(normalized)) {
+        orderGroups.set(normalized, []);
+      }
+      orderGroups.get(normalized)!.push({
+        rawOrderId,
+        orderStatus,
+        deliveryDate,
+        returnRefund,
+        buyerPaid,
+        voucher,
+        productName,
+        price,
+        quantity
+      });
+    }
+
+    // Tổng hợp từng đơn hàng
+    for (const [normOrderId, items] of orderGroups.entries()) {
+      const first = items[0];
+      const isCancelled = first.orderStatus.toLowerCase().includes("hủy") ||
+                          first.orderStatus.toLowerCase().includes("cancel") ||
+                          first.returnRefund.toLowerCase().includes("cancel");
+
+      let totalBuyerPaid = 0;
+      let shopVoucher = 0;
+      let calculatedRevenue = 0;
+      const warnings: string[] = [];
+
+      if (isTikTok) {
+        // TIKTOK REVENUE = SUM(SKU Subtotal Before Discount) - SUM(SKU Seller Discount)
+        totalBuyerPaid = items.reduce((sum, it) => sum + it.buyerPaid, 0);
+        shopVoucher = items.reduce((sum, it) => sum + it.voucher, 0);
+        calculatedRevenue = totalBuyerPaid - shopVoucher;
+      } else {
+        // SHOPEE REVENUE = SUM(Tổng số tiền Người mua thanh toán) - Voucher Shop (1 lần)
+        if (items.length === 1) {
+          totalBuyerPaid = first.buyerPaid;
+          shopVoucher = first.voucher;
+        } else {
+          // Nhiều dòng SKU
+          const paidList = items.map(it => it.buyerPaid);
+          const nonZeroPaid = paidList.filter(v => v > 0);
+          const allPaidSame = nonZeroPaid.length > 0 && nonZeroPaid.every(v => v === nonZeroPaid[0]);
+
+          let isRepeatedOrderLevelPaid = false;
+          if (allPaidSame && priceIdx >= 0) {
+            const sumItemPrices = items.reduce((sum, it) => sum + (it.price * it.quantity), 0);
+            if (sumItemPrices > 0 && Math.abs(sumItemPrices - nonZeroPaid[0]) < Math.abs(sumItemPrices - (nonZeroPaid[0] * items.length))) {
+              isRepeatedOrderLevelPaid = true;
+            }
+          }
+
+          if (isRepeatedOrderLevelPaid) {
+            totalBuyerPaid = nonZeroPaid[0];
+          } else {
+            totalBuyerPaid = paidList.reduce((sum, v) => sum + v, 0);
+          }
+
+          // Voucher shop Shopee: nếu lặp lại thì chỉ trừ 1 lần
+          const nonZeroVouchers = items.map(it => it.voucher).filter(v => v > 0);
+          if (nonZeroVouchers.length > 0) {
+            const firstV = nonZeroVouchers[0];
+            const allSame = nonZeroVouchers.every(v => v === firstV);
+            if (allSame) {
+              shopVoucher = firstV;
+            } else {
+              shopVoucher = Math.max(...nonZeroVouchers);
+              warnings.push("Dữ liệu mã giảm giá không nhất quán giữa các dòng SKU của đơn");
+            }
+          }
+        }
+        calculatedRevenue = totalBuyerPaid - shopVoucher;
+      }
+
+      const compositeKey = `${normShopKey}::${normOrderId}`;
+
+      resultMap.set(compositeKey, {
+        shopKey: normShopKey,
+        rawShopName: targetSalesShop,
+        orderId: normOrderId,
+        originalOrderId: first.rawOrderId,
+        orderStatus: first.orderStatus,
+        isCancelled,
+        deliveryDate: first.deliveryDate,
+        returnRefundStatus: first.returnRefund,
+        totalBuyerPaid,
+        shopVoucher,
+        voucherInconsistent: warnings.length > 0,
+        voucherValuesFound: Array.from(new Set(items.map(it => it.voucher))),
+        calculatedRevenue,
+        rowCount: items.length,
+        sourceRows: items.map(it => ({
+          productName: it.productName || `SKU ${it.rawOrderId}`,
+          price: it.price,
+          quantity: it.quantity,
+          buyerPaid: it.buyerPaid,
+          shopVoucher: it.voucher
+        })),
+        warnings
+      });
+    }
+  }
+
+  return resultMap;
+}
+
+/**
+ * Backward compatibility parser (used only for small demo workbooks)
+ */
+export function parseMarketplaceWorkbook(
+  workbook: XLSX.WorkBook,
+  fileName: string,
+  customMapping?: Partial<MarketplaceColumnMapping>
+): ParsedMarketplaceResult {
+  const inspection = inspectMarketplaceWorkbook(workbook, fileName, 0, customMapping);
+  const sheets: ParsedMarketplaceSheet[] = inspection.sheets.map(s => ({
+    sheetName: s.sheetName,
+    rowCount: s.approxRowCount,
+    headers: s.headers,
+    headerRowIndex: 0,
+    detectedMapping: s.detectedMapping,
+    rows: [],
+    diagnostics: {
+      totalRows: s.approxRowCount,
+      rowsWithOrderId: s.approxRowCount,
+      rowsMissingOrderId: 0,
+      uniqueOrderCount: s.approxRowCount,
+      duplicateOrderCount: 0
+    }
+  }));
 
   return {
     fileName,
     sheets,
-    allDetectedShopNames,
-    totalRows: totalRowsAcrossSheets,
-    totalUniqueOrders: allUniqueOrdersSet.size,
-    warnings
+    allDetectedShopNames: inspection.allDetectedShopNames,
+    totalRows: inspection.totalApproxRows,
+    totalUniqueOrders: inspection.totalApproxRows,
+    warnings: []
   };
 }

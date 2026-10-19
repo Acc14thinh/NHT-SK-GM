@@ -22,18 +22,77 @@ export interface SalesSoftwareRawRow {
 }
 
 /**
+ * Slim representations to avoid memory bloat in detail views
+ */
+export interface SlimMarketplaceRow {
+  productName?: string;
+  price?: number;
+  quantity?: number;
+  buyerPaid?: number;
+  shopVoucher?: number;
+  [key: string]: any;
+}
+
+export interface SlimSalesRow {
+  invoiceNumber?: string;
+  invoiceDate?: string;
+  voucherNumber?: string;
+  totalAmount?: number;
+  note?: string;
+  [key: string]: any;
+}
+
+/**
+ * Phase 1: Lightweight Inspection Types (No raw rows stored in React state)
+ */
+export interface MarketplaceSheetInspection {
+  sheetName: string;
+  platform: MarketplaceType;
+  headers: string[];
+  detectedMapping: MarketplaceColumnMapping;
+  previewValuesByCol: Record<string, string[]>;
+  approxRowCount: number;
+}
+
+export interface MarketplaceInspectionResult {
+  fileName: string;
+  fileSize: number;
+  sheets: MarketplaceSheetInspection[];
+  allDetectedShopNames: string[];
+  totalApproxRows: number;
+  totalRows: number;
+}
+
+export interface SalesSoftwareInspectionResult {
+  fileName: string;
+  fileSize: number;
+  sheetName: string;
+  headers: string[];
+  detectedMapping: SalesSoftwareColumnMapping;
+  previewValuesByCol: Record<string, string[]>;
+  detectedShops: string[];
+  approxRowCount: number;
+  totalRows: number;
+  rows?: any[];
+}
+
+/**
  * Mapping cấu hình cột cho File Sàn TMĐT
  */
 export interface MarketplaceColumnMapping {
   orderIdCol: string;         // Mã đơn hàng (Bắt buộc)
-  buyerPaidCol: string;       // Tổng số tiền Người mua thanh toán (Shopee)
-  shopVoucherCol: string;     // Mã giảm giá của Shop (Shopee)
+  buyerPaidCol: string;       // Tổng số tiền Người mua thanh toán (Shopee) / Subtotal (TikTok)
+  shopVoucherCol: string;     // Mã giảm giá của Shop (Shopee) / Seller Discount (TikTok)
   orderStatusCol: string;     // Trạng Thái Đơn Hàng
   deliveryTimeCol: string;    // Thời gian giao hàng
   returnRefundCol: string;    // Trạng thái Trả hàng/Hoàn tiền
   skuCol?: string;            // Tên sản phẩm / SKU
   priceCol?: string;          // Giá sản phẩm
   quantityCol?: string;       // Số lượng
+  // TikTok specific columns
+  tiktokCancelReturnCol?: string;
+  tiktokSellerDiscountCol?: string;
+  tiktokSubtotalCol?: string;
 }
 
 /**
@@ -94,7 +153,7 @@ export interface AggregatedMarketplaceOrder {
   voucherValuesFound: number[];   // Danh sách các giá trị voucher tìm thấy
   calculatedRevenue: number;      // Doanh thu tính toán = totalBuyerPaid - shopVoucher
   rowCount: number;               // Số dòng SKU
-  sourceRows: MarketplaceRawRow[];// Các dòng gốc
+  sourceRows: (MarketplaceRawRow | SlimMarketplaceRow)[]; // Dòng chi tiết thu gọn
   warnings: string[];             // Cảnh báo nếu có
 }
 
@@ -114,7 +173,7 @@ export interface AggregatedSalesOrder {
   isMultiInvoice: boolean;        // Có nhiều hóa đơn phân biệt
   isRepeatedAmount: boolean;      // Tiền bị lặp lại ở nhiều dòng của cùng chứng từ
   isAmbiguous: boolean;           // Không chắc chắn cách tính gộp
-  sourceRows: SalesSoftwareRawRow[];
+  sourceRows: (SalesSoftwareRawRow | SlimSalesRow)[];
   warnings: string[];
 }
 

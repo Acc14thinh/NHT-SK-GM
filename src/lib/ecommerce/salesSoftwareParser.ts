@@ -156,27 +156,28 @@ export function autoDetectSalesSoftwareColumns(headers: string[]): SalesSoftware
 }
 
 /**
- * Phân tích workbook phần mềm bán hàng
+ * PHASE 1: LIGHTWEIGHT INSPECTION (Phần Mềm Bán Hàng)
+ * Chỉ đọc tối đa 25 dòng đầu tiên để lấy headers, mapping, và sample preview.
+ * Tuyệt đối không convert hàng chục nghìn dòng thành JSON trong React state.
  */
-export function parseSalesSoftwareWorkbook(
+export function inspectSalesSoftwareWorkbook(
   workbook: XLSX.WorkBook,
   fileName: string,
+  fileSize: number = 0,
   preferredSheet?: string,
   customMapping?: Partial<SalesSoftwareColumnMapping>
-): ParsedSalesSoftwareResult {
+): import("./types").SalesSoftwareInspectionResult {
   const sheetName = preferredSheet && workbook.Sheets[preferredSheet]
     ? preferredSheet
     : workbook.SheetNames[0];
 
   const worksheet = workbook.Sheets[sheetName];
-  const warnings: string[] = [];
-
   if (!worksheet) {
     return {
       fileName,
+      fileSize,
       sheetName: "",
       headers: [],
-      headerRowIndex: 0,
       detectedMapping: {
         shopNameCol: "",
         orderIdCol: "",
@@ -184,30 +185,30 @@ export function parseSalesSoftwareWorkbook(
         invoiceDateCol: "",
         totalAmountCol: ""
       },
-      rows: [],
+      previewValuesByCol: {},
       detectedShops: [],
-      diagnostics: {
-        totalRows: 0,
-        rowsWithShop: 0,
-        rowsMissingShop: 0,
-        rowsWithOrderId: 0,
-        rowsMissingOrderId: 0,
-        uniqueOrderCount: 0,
-        duplicateOrderCount: 0,
-        shopDistribution: {}
-      },
-      warnings: ["Tệp không chứa sheet dữ liệu hợp lệ."]
+      approxRowCount: 0,
+      totalRows: 0,
+      rows: []
     };
   }
 
-  // Đọc raw 2D array
+  let approxRowCount = 0;
+  if (worksheet["!ref"]) {
+    try {
+      const decoded = XLSX.utils.decode_range(worksheet["!ref"]);
+      approxRowCount = Math.max(0, decoded.e.r - decoded.s.r);
+    } catch {
+      approxRowCount = 0;
+    }
+  }
+
   const rawData: any[][] = XLSX.utils.sheet_to_json(worksheet, {
     header: 1,
     defval: "",
-    raw: false // ép chuỗi tránh scientific notation
+    raw: false
   });
 
-  // Tìm header row
   let headerRowIdx = -1;
   for (let r = 0; r < Math.min(10, rawData.length); r++) {
     const rowStr = (rawData[r] || []).map(cell => String(cell || "").toLowerCase()).join(" ");
@@ -219,99 +220,280 @@ export function parseSalesSoftwareWorkbook(
       break;
     }
   }
-
-  if (headerRowIdx === -1) {
-    headerRowIdx = 0;
-  }
+  if (headerRowIdx === -1) headerRowIdx = 0;
 
   const rawHeaders: string[] = (rawData[headerRowIdx] || []).map((h: any, idx: number) => {
     const s = String(h || "").trim();
     return s || `Cột_${idx + 1}`;
   });
 
-  const detected = autoDetectSalesSoftwareColumns(rawHeaders);
-  const finalMapping: SalesSoftwareColumnMapping = {
-    ...detected,
-    ...customMapping
-  };
-
-  if (!finalMapping.orderIdCol) {
-    warnings.push("Không tự động nhận diện được cột [Số đơn hàng từ hệ thống khác / Mã đơn]. Vui lòng chọn thủ công.");
-  }
-  if (!finalMapping.shopNameCol) {
-    warnings.push("Không tự động nhận diện được cột [Tên Shop]. Vui lòng chọn thủ công.");
+  let detected = autoDetectSalesSoftwareColumns(rawHeaders);
+  if (customMapping) {
+    detected = { ...detected, ...customMapping };
   }
 
-  // Đọc rows
-  const rows: SalesSoftwareRawRow[] = [];
+  // Preview samples and shop discovery from top rows
+  const previewValuesByCol: Record<string, string[]> = {};
   const detectedShopsSet = new Set<string>();
-  const shopDistribution: { [shopName: string]: number } = {};
-  const seenOrders = new Set<string>();
-  let rowsWithShop = 0;
-  let rowsMissingShop = 0;
-  let rowsWithOrderId = 0;
-  let rowsMissingOrderId = 0;
-  let duplicateOrderCount = 0;
 
-  for (let r = headerRowIdx + 1; r < rawData.length; r++) {
-    const rowData = rawData[r];
-    if (!rowData || rowData.length === 0) continue;
-
-    const hasContent = rowData.some(cell => cell !== null && cell !== undefined && String(cell).trim() !== "");
-    if (!hasContent) continue;
-
-    const rowObj: SalesSoftwareRawRow = {};
-    rawHeaders.forEach((h, colIdx) => {
-      rowObj[h] = rowData[colIdx] !== undefined ? rowData[colIdx] : "";
-    });
-
-    // Check shop name
-    const rawShop = finalMapping.shopNameCol ? String(rowObj[finalMapping.shopNameCol] || "").trim() : "";
-    if (rawShop) {
-      rowsWithShop++;
-      detectedShopsSet.add(rawShop);
-      shopDistribution[rawShop] = (shopDistribution[rawShop] || 0) + 1;
-    } else {
-      rowsMissingShop++;
-    }
-
-    // Check order id
-    const rawOrderId = finalMapping.orderIdCol ? rowObj[finalMapping.orderIdCol] : "";
-    const { normalized } = normalizeOrderId(rawOrderId);
-
-    if (normalized) {
-      rowsWithOrderId++;
-      const compositeKey = `${rawShop || "UNASSIGNED"}::${normalized}`;
-      if (seenOrders.has(compositeKey)) {
-        duplicateOrderCount++;
-      } else {
-        seenOrders.add(compositeKey);
+  for (let c = 0; c < rawHeaders.length; c++) {
+    const h = rawHeaders[c];
+    const samples: string[] = [];
+    for (let r = headerRowIdx + 1; r < rawData.length; r++) {
+      const val = rawData[r]?.[c];
+      if (val !== undefined && val !== null && String(val).trim() !== "") {
+        samples.push(String(val).trim());
+        if (h === detected.shopNameCol) {
+          detectedShopsSet.add(String(val).trim());
+        }
+        if (samples.length >= 4 && h !== detected.shopNameCol) break;
       }
-    } else {
-      rowsMissingOrderId++;
     }
-
-    rows.push(rowObj);
+    previewValuesByCol[h] = samples;
   }
 
+  const approx = Math.max(approxRowCount, rawData.length - headerRowIdx - 1);
   return {
     fileName,
+    fileSize,
     sheetName,
     headers: rawHeaders,
-    headerRowIndex: headerRowIdx,
-    detectedMapping: finalMapping,
-    rows,
+    detectedMapping: detected,
+    previewValuesByCol,
     detectedShops: Array.from(detectedShopsSet).sort(),
+    approxRowCount: approx,
+    totalRows: approx,
+    rows: []
+  };
+}
+
+/**
+ * PHASE 2: FULL PROCESSING (Phần Mềm Bán Hàng)
+ * Trích xuất có chọn lọc CHỈ các cột tham gia đối chiếu, gom nhóm trực tiếp,
+ * giải phóng bộ nhớ ngay, không tạo object thừa cho các cột khác.
+ */
+export function parseSalesOrdersForReconciliation(
+  workbook: XLSX.WorkBook,
+  sheetName: string,
+  mapping: SalesSoftwareColumnMapping
+): Map<string, import("./types").AggregatedSalesOrder> {
+  const { normalizeOrderId, normalizeShopName, parseCurrencyVnd } = require("./orderNormalizer");
+  const resultMap = new Map<string, import("./types").AggregatedSalesOrder>();
+
+  const targetSheetName = sheetName && workbook.Sheets[sheetName] ? sheetName : workbook.SheetNames[0];
+  const worksheet = workbook.Sheets[targetSheetName];
+  if (!worksheet || !mapping.orderIdCol || !mapping.shopNameCol) return resultMap;
+
+  const rawData: any[][] = XLSX.utils.sheet_to_json(worksheet, {
+    header: 1,
+    defval: "",
+    raw: false
+  });
+  if (!rawData || rawData.length === 0) return resultMap;
+
+  let headerRowIdx = 0;
+  for (let r = 0; r < Math.min(10, rawData.length); r++) {
+    const rowStr = (rawData[r] || []).map(cell => String(cell || "").toLowerCase()).join(" ");
+    if (
+      (rowStr.includes("tên shop") || rowStr.includes("cửa hàng")) &&
+      (rowStr.includes("số đơn") || rowStr.includes("mã đơn") || rowStr.includes("hệ thống khác"))
+    ) {
+      headerRowIdx = r;
+      break;
+    }
+  }
+
+  const headers: string[] = (rawData[headerRowIdx] || []).map((h: any, idx: number) => String(h || "").trim() || `Cột_${idx + 1}`);
+
+  const shopNameIdx = headers.indexOf(mapping.shopNameCol);
+  const orderIdIdx = headers.indexOf(mapping.orderIdCol);
+  const invoiceNumIdx = mapping.invoiceNumberCol ? headers.indexOf(mapping.invoiceNumberCol) : -1;
+  const invoiceDateIdx = mapping.invoiceDateCol ? headers.indexOf(mapping.invoiceDateCol) : -1;
+  const totalAmountIdx = mapping.totalAmountCol ? headers.indexOf(mapping.totalAmountCol) : -1;
+  const voucherNumIdx = mapping.voucherNumberCol ? headers.indexOf(mapping.voucherNumberCol) : -1;
+  const marketplaceIdx = mapping.marketplaceCol ? headers.indexOf(mapping.marketplaceCol) : -1;
+  const cancelledIdx = mapping.cancelledCol ? headers.indexOf(mapping.cancelledCol) : -1;
+  const noteIdx = mapping.noteCol ? headers.indexOf(mapping.noteCol) : -1;
+
+  if (shopNameIdx === -1 || orderIdIdx === -1 || totalAmountIdx === -1) return resultMap;
+
+  interface SlimSalesRowItem {
+    rawShop: string;
+    rawOrderId: string;
+    invoiceNum: string;
+    invoiceDate: string;
+    voucherNum: string;
+    totalAmount: number;
+    channel: string;
+    cancelled: boolean;
+    note: string;
+  }
+
+  // Gom tạm theo normalizedShop + "::" + normalizedOrderId
+  const orderGroups = new Map<string, SlimSalesRowItem[]>();
+
+  for (let r = headerRowIdx + 1; r < rawData.length; r++) {
+    const row = rawData[r];
+    if (!row || row.length === 0) continue;
+
+    const rawShop = String(row[shopNameIdx] || "").trim();
+    const rawOrderId = String(row[orderIdIdx] || "").trim();
+    const { normalized } = normalizeOrderId(rawOrderId);
+    if (!rawShop || !normalized) continue;
+
+    const invoiceNum = invoiceNumIdx >= 0 ? String(row[invoiceNumIdx] || "").trim() : "";
+    const invoiceDate = invoiceDateIdx >= 0 ? String(row[invoiceDateIdx] || "").trim() : "";
+    const voucherNum = voucherNumIdx >= 0 ? String(row[voucherNumIdx] || "").trim() : "";
+    const totalAmount = parseCurrencyVnd(row[totalAmountIdx]);
+    const channel = marketplaceIdx >= 0 ? String(row[marketplaceIdx] || "").trim() : "";
+    const cancelStr = cancelledIdx >= 0 ? String(row[cancelledIdx] || "").trim().toLowerCase() : "";
+    const cancelled = cancelStr.includes("hủy") || cancelStr.includes("huy") || cancelStr.includes("cancel") || cancelStr === "1" || cancelStr === "true";
+    const note = noteIdx >= 0 ? String(row[noteIdx] || "").trim() : "";
+
+    const normShopKey = normalizeShopName(rawShop);
+    const compositeKey = `${normShopKey}::${normalized}`;
+
+    if (!orderGroups.has(compositeKey)) {
+      orderGroups.set(compositeKey, []);
+    }
+    orderGroups.get(compositeKey)!.push({
+      rawShop,
+      rawOrderId,
+      invoiceNum,
+      invoiceDate,
+      voucherNum,
+      totalAmount,
+      channel,
+      cancelled,
+      note
+    });
+  }
+
+  // Tổng hợp từng đơn hàng
+  for (const [compositeKey, groupRows] of orderGroups.entries()) {
+    const first = groupRows[0];
+    const { normalized: normOrderId } = normalizeOrderId(first.rawOrderId);
+    const normShopKey = normalizeShopName(first.rawShop);
+
+    const invoiceNumbers = new Set<string>();
+    const invoiceDates = new Set<string>();
+    const voucherNumbers = new Set<string>();
+    const warnings: string[] = [];
+
+    groupRows.forEach(r => {
+      if (r.invoiceNum) invoiceNumbers.add(r.invoiceNum);
+      if (r.invoiceDate) invoiceDates.add(r.invoiceDate);
+      if (r.voucherNum) voucherNumbers.add(r.voucherNum);
+      if (r.channel && !r.channel.toLowerCase().includes("shopee") && !r.channel.toLowerCase().includes("tiktok")) {
+        const w = `Kênh bán hàng là "${r.channel}"`;
+        if (!warnings.includes(w)) warnings.push(w);
+      }
+      if (r.cancelled) {
+        const w = "Đơn ghi nhận trạng thái HỦY trên phần mềm bán hàng";
+        if (!warnings.includes(w)) warnings.push(w);
+      }
+    });
+
+    let totalAmount = 0;
+    let isMultiInvoice = false;
+    let isRepeatedAmount = false;
+    let isAmbiguous = false;
+
+    if (groupRows.length === 1) {
+      totalAmount = first.totalAmount;
+    } else {
+      const amounts = groupRows.map(r => r.totalAmount);
+      const distinctInvoices = Array.from(invoiceNumbers).filter(Boolean);
+
+      if (distinctInvoices.length > 1) {
+        isMultiInvoice = true;
+        const rowsByInvoice = new Map<string, number[]>();
+        groupRows.forEach(r => {
+          const inv = r.invoiceNum || "CHUNG";
+          if (!rowsByInvoice.has(inv)) rowsByInvoice.set(inv, []);
+          rowsByInvoice.get(inv)!.push(r.totalAmount);
+        });
+
+        rowsByInvoice.forEach((invAmounts) => {
+          const nonZero = invAmounts.filter(a => a > 0);
+          const allSame = nonZero.length > 0 && nonZero.every(a => a === nonZero[0]);
+          if (allSame) {
+            totalAmount += nonZero[0];
+          } else {
+            totalAmount += invAmounts.reduce((sum, a) => sum + a, 0);
+          }
+        });
+      } else {
+        const nonZero = amounts.filter(a => a > 0);
+        const allSame = nonZero.length > 0 && nonZero.every(a => a === nonZero[0]);
+        if (allSame) {
+          totalAmount = nonZero[0];
+          isRepeatedAmount = true;
+        } else {
+          totalAmount = amounts.reduce((sum, a) => sum + a, 0);
+          if (distinctInvoices.length === 0) {
+            isAmbiguous = true;
+            warnings.push("Mã đơn có nhiều dòng chi tiết không kèm số hóa đơn phân biệt - đã tính tổng cộng");
+          }
+        }
+      }
+    }
+
+    resultMap.set(compositeKey, {
+      shopKey: normShopKey,
+      rawShopName: first.rawShop,
+      orderId: normOrderId,
+      originalOrderId: first.rawOrderId,
+      invoiceNumbers: Array.from(invoiceNumbers),
+      invoiceDates: Array.from(invoiceDates),
+      voucherNumbers: Array.from(voucherNumbers),
+      totalAmount,
+      rowCount: groupRows.length,
+      isMultiInvoice,
+      isRepeatedAmount,
+      isAmbiguous,
+      sourceRows: groupRows.map(r => ({
+        invoiceNumber: r.invoiceNum || "--",
+        invoiceDate: r.invoiceDate || "--",
+        voucherNumber: r.voucherNum || "--",
+        totalAmount: r.totalAmount,
+        note: r.note || "--"
+      })),
+      warnings
+    });
+  }
+
+  return resultMap;
+}
+
+/**
+ * Backward compatibility parser (used only for small demo workbooks)
+ */
+export function parseSalesSoftwareWorkbook(
+  workbook: XLSX.WorkBook,
+  fileName: string,
+  preferredSheet?: string,
+  customMapping?: Partial<SalesSoftwareColumnMapping>
+): ParsedSalesSoftwareResult {
+  const inspection = inspectSalesSoftwareWorkbook(workbook, fileName, 0, preferredSheet, customMapping);
+  return {
+    fileName,
+    sheetName: inspection.sheetName,
+    headers: inspection.headers,
+    headerRowIndex: 0,
+    detectedMapping: inspection.detectedMapping,
+    rows: [],
+    detectedShops: inspection.detectedShops,
     diagnostics: {
-      totalRows: rows.length,
-      rowsWithShop,
-      rowsMissingShop,
-      rowsWithOrderId,
-      rowsMissingOrderId,
-      uniqueOrderCount: seenOrders.size,
-      duplicateOrderCount,
-      shopDistribution
+      totalRows: inspection.approxRowCount,
+      rowsWithShop: inspection.approxRowCount,
+      rowsMissingShop: 0,
+      rowsWithOrderId: inspection.approxRowCount,
+      rowsMissingOrderId: 0,
+      uniqueOrderCount: inspection.approxRowCount,
+      duplicateOrderCount: 0,
+      shopDistribution: {}
     },
-    warnings
+    warnings: []
   };
 }

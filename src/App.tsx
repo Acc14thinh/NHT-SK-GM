@@ -3961,7 +3961,9 @@ export default function App() {
 
           {/* --- TAB CONTENT: ECOMMERCE RECONCILIATION --- */}
           {currentTab === "ecommerce" && (
-            <EcommerceReconciliationView />
+            <ErrorBoundary fallbackTitle="LỖI PHÂN HỆ ĐỐI CHIẾU DOANH THU SÀN TMĐT">
+              <EcommerceReconciliationView />
+            </ErrorBoundary>
           )}
 
           {/* --- TAB CONTENT: SETTINGS & MASTER DIRECTORIES --- */}
