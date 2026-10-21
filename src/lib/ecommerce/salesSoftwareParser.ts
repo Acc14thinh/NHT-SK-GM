@@ -5,7 +5,7 @@
 import * as XLSX from "xlsx";
 import { SalesSoftwareColumnMapping, SalesSoftwareRawRow } from "./types";
 import { findBestMatchingHeader, findStrictMatchingHeader } from "./shopeeParser";
-import { normalizeOrderId } from "./orderNormalizer";
+import { normalizeOrderId, normalizeShopName, parseCurrencyVnd } from "./orderNormalizer";
 import { getSavedHeaderMappings } from "./shopMapper";
 
 export interface ParsedSalesSoftwareResult {
@@ -277,7 +277,6 @@ export function parseSalesOrdersForReconciliation(
   sheetName: string,
   mapping: SalesSoftwareColumnMapping
 ): Map<string, import("./types").AggregatedSalesOrder> {
-  const { normalizeOrderId, normalizeShopName, parseCurrencyVnd } = require("./orderNormalizer");
   const resultMap = new Map<string, import("./types").AggregatedSalesOrder>();
 
   const targetSheetName = sheetName && workbook.Sheets[sheetName] ? sheetName : workbook.SheetNames[0];

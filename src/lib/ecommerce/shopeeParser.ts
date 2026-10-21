@@ -4,7 +4,7 @@
  */
 import * as XLSX from "xlsx";
 import { MarketplaceColumnMapping, MarketplaceRawRow } from "./types";
-import { normalizeOrderId } from "./orderNormalizer";
+import { normalizeOrderId, normalizeShopName, parseCurrencyVnd } from "./orderNormalizer";
 import { getSavedHeaderMappings } from "./shopMapper";
 
 export interface ParsedMarketplaceSheet {
@@ -184,16 +184,28 @@ export function autoDetectShopeeColumns(headers: string[]): MarketplaceColumnMap
 export function detectMarketplacePlatform(headers: string[]): "SHOPEE" | "TIKTOK" | "OTHER" {
   if (!headers || headers.length === 0) return "SHOPEE";
   const hLower = headers.map(h => String(h || "").toLowerCase().trim());
-  const hasTikTok = hLower.some(h =>
-    h === "order id" ||
-    h.includes("sku subtotal") ||
-    h.includes("seller discount") ||
-    h.includes("cancelation/return") ||
-    h.includes("cancellation/return") ||
-    h.includes("order refund amount")
-  );
-  if (hasTikTok) return "TIKTOK";
 
+  let shopeeScore = 0;
+  let tikTokScore = 0;
+
+  for (const h of hLower) {
+    // Shopee specific indicators
+    if (h.includes("người mua thanh toán") || h.includes("nguoi mua thanh toan")) shopeeScore += 5;
+    if (h.includes("mã giảm giá của shop") || h.includes("ma giam gia cua shop")) shopeeScore += 4;
+    if (h === "mã đơn hàng" || h === "ma don hang") shopeeScore += 3;
+    if (h.includes("trả hàng/hoàn tiền") || h.includes("tra hang/hoan tien")) shopeeScore += 3;
+    if (h.includes("thời gian giao hàng") || h.includes("thoi gian giao hang")) shopeeScore += 2;
+
+    // TikTok specific indicators
+    if (h.includes("sku subtotal") || h.includes("subtotal before discount")) tikTokScore += 5;
+    if (h.includes("seller discount") || h.includes("sku seller discount")) tikTokScore += 4;
+    if (h.includes("cancelation/return") || h.includes("cancellation/return")) tikTokScore += 4;
+    if (h.includes("order refund amount")) tikTokScore += 4;
+    if (h === "seller sku" || h === "sku id") tikTokScore += 3;
+    if (h === "order id" || h === "orderid") tikTokScore += 2;
+  }
+
+  if (tikTokScore > shopeeScore) return "TIKTOK";
   return "SHOPEE";
 }
 
@@ -346,7 +358,6 @@ export function parseMarketplaceOrdersForReconciliation(
   inspectedSheets: import("./types").MarketplaceSheetInspection[],
   shopMappings: import("./types").ShopMappingEntry[]
 ): Map<string, import("./types").AggregatedMarketplaceOrder> {
-  const { normalizeOrderId, normalizeShopName, parseCurrencyVnd } = require("./orderNormalizer");
   const resultMap = new Map<string, import("./types").AggregatedMarketplaceOrder>();
 
   // Map sheet -> targetSalesShop

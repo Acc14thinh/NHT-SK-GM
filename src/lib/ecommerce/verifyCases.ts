@@ -2,10 +2,9 @@
  * Automated Verification Script for E-Commerce Reconciliation Test Cases
  */
 import { generateDemoEcommerceWorkbooks } from "./mockEcommerceData";
-import { parseMarketplaceWorkbook } from "./shopeeParser";
-import { parseSalesSoftwareWorkbook } from "./salesSoftwareParser";
+import { inspectMarketplaceWorkbook, parseMarketplaceOrdersForReconciliation } from "./shopeeParser";
+import { inspectSalesSoftwareWorkbook, parseSalesOrdersForReconciliation } from "./salesSoftwareParser";
 import { buildProposedShopMappings } from "./shopMapper";
-import { aggregateMarketplaceOrders, aggregateSalesOrders } from "./aggregator";
 import { reconcileEcommerceRevenue } from "./reconciliationEngine";
 
 export function runAllTestCases(): { success: boolean; results: string[]; failedCount: number } {
@@ -23,9 +22,9 @@ export function runAllTestCases(): { success: boolean; results: string[]; failed
 
   const { shopeeWorkbook, shopeeFileName, salesWorkbook, salesFileName } = generateDemoEcommerceWorkbooks();
 
-  // 1. Parse both workbooks
-  const parsedMarketplace = parseMarketplaceWorkbook(shopeeWorkbook, shopeeFileName);
-  const parsedSales = parseSalesSoftwareWorkbook(salesWorkbook, salesFileName);
+  // 1. Inspect both workbooks (Phase 1)
+  const parsedMarketplace = inspectMarketplaceWorkbook(shopeeWorkbook, shopeeFileName);
+  const parsedSales = inspectSalesSoftwareWorkbook(salesWorkbook, salesFileName);
 
   assert(parsedMarketplace.sheets.length >= 3, "Parsed marketplace sheets", `Sheets: ${parsedMarketplace.sheets.length}`);
   assert(parsedSales.detectedShops.length >= 3, "Detected sales shops", `Shops: ${parsedSales.detectedShops.join(", ")}`);
@@ -43,9 +42,9 @@ export function runAllTestCases(): { success: boolean; results: string[]; failed
   const msmartyMapping = proposedMappings.find(m => m.marketplaceSheetOrShop === "Msmarty");
   assert(msmartyMapping?.salesShopName === "M'Smarty Shop", "Case 7: Sheet 'Msmarty' mapped to 'M'Smarty Shop'");
 
-  // 3. Aggregation
-  const marketplaceOrders = aggregateMarketplaceOrders(parsedMarketplace.sheets, proposedMappings);
-  const salesOrders = aggregateSalesOrders(parsedSales.rows, parsedSales.detectedMapping);
+  // 3. Aggregation (Phase 2)
+  const marketplaceOrders = parseMarketplaceOrdersForReconciliation(shopeeWorkbook, parsedMarketplace.sheets, proposedMappings);
+  const salesOrders = parseSalesOrdersForReconciliation(salesWorkbook, parsedSales.sheetName, parsedSales.detectedMapping);
 
   // Case 2: Multi-SKU voucher shop repeated once
   const order002 = marketplaceOrders.get("metakystore::SPX260701_002");
